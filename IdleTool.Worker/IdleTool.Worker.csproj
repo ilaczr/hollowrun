@@ -2,10 +2,14 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+    <AssemblyName>IdleTool.Worker</AssemblyName>
+    <RootNamespace>IdleTool.Worker</RootNamespace>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Platforms>AnyCPU;x64</Platforms>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
 
   <ItemGroup>
@@ -15,6 +19,16 @@
   <Target Name="CopySteamApiDll" AfterTargets="Build;Publish">
     <Copy SourceFiles="$(NuGetPackageRoot)facepunch.steamworks\2.3.3\content\steam_api64.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(NuGetPackageRoot)facepunch.steamworks\2.3.3\content\steam_api64.dll" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="'$(PublishDir)' != ''" />
+  </Target>
+
+  <Target Name="RemoveLegacyWorkerArtifacts" AfterTargets="Publish">
+    <ItemGroup>
+      <LegacyWorkerArtifact Include="$(PublishDir)SteamWorker.exe" />
+      <LegacyWorkerArtifact Include="$(PublishDir)SteamWorker.dll" />
+      <LegacyWorkerArtifact Include="$(PublishDir)SteamWorker.deps.json" />
+      <LegacyWorkerArtifact Include="$(PublishDir)SteamWorker.runtimeconfig.json" />
+    </ItemGroup>
+    <Delete Files="@(LegacyWorkerArtifact)" />
   </Target>
 
 </Project>

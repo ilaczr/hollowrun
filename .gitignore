@@ -1,17 +1,22 @@
 node_modules/
 dist/
+dist-ssr/
 .env
+*.local
 
 # .NET
 bin/
 obj/
 *.user
 *.suo
+*.pdb
 *.userosscache
 *.sln.docstates
 
 # VS Code
 .vscode/
+.idea/
+.DS_Store
 
 # Logs and cache
 *.log
@@ -21,12 +26,7 @@ yarn-error.log*
 game_info_cache.json
 custom_games.json
 backend/workers/
-.vs/  
+.vs/
 
 # Electron build output
 dist-electron/
-
-# Launcher build output
-TestApp/
-IdleToolLauncher/bin/
-IdleToolLauncher/obj/

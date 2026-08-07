@@ -1,13 +1,20 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { 
   Gamepad2, LayoutDashboard, CheckSquare, UserCircle, Cloud, 
-  BarChart3, FileText, Settings, Activity, Clock, ListChecks, 
-  RotateCw, Zap, Hexagon, Search, Filter, Grid, List, MoreVertical,
-  Minus, Square, X, Check
+  Settings, Activity, Clock, ListChecks, Zap, Hexagon, Search,
+  MoreVertical, Square, X
 } from 'lucide-react';
-import Login from './Login';
 
-const API_BASE = 'http://localhost:3824/api';
+const API_BASE = '/api';
+
+async function requestJson(path, options) {
+  const response = await fetch(`${API_BASE}${path}`, options);
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data || data.success === false) {
+    throw new Error(data?.error || `Request failed (${response.status})`);
+  }
+  return data;
+}
 
 function formatTimer(seconds) {
   const hrs = Math.floor(seconds / 3600);
@@ -23,37 +30,16 @@ function formatPlaytime(minutes) {
   return `${hrs}h`;
 }
 
-function formatLastPlayed(isoStr) {
-  if (!isoStr) return null;
-  const d = new Date(isoStr);
-  const now = new Date();
-  const diffDays = Math.floor((now - d) / (1000 * 60 * 60 * 24));
-  if (diffDays === 0) return 'Today';
-  if (diffDays === 1) return 'Yesterday';
-  if (diffDays < 30) return `${diffDays} days ago`;
-  if (diffDays < 365) return `${Math.floor(diffDays / 30)} months ago`;
-  return `${Math.floor(diffDays / 365)}y ago`;
-}
-
-function debounce(fn, delay) {
-  let timer;
-  return (...args) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), delay);
-  };
-}
-
 export default function App() {
   const [status, setStatus] = useState(null);
   const [games, setGames] = useState({ installed: [], presets: [], custom: [], libraryStats: null });
   const [sessions, setSessions] = useState([]);
   const [activeTab, setActiveTab] = useState('all'); // maps to Sidebar: Dashboard (all), Games (installed), Tasks (presets), etc.
   const [searchQuery, setSearchQuery] = useState('');
-  const [autoStopHours, setAutoStopHours] = useState('off');
   const [showAddModal, setShowAddModal] = useState(false);
   const [customAppId, setCustomAppId] = useState('');
-  const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState('');
   const [currentTime, setCurrentTime] = useState(new Date());
   
   const [storeSearchQuery, setStoreSearchQuery] = useState('');
@@ -65,47 +51,29 @@ export default function App() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [enrichedCache, setEnrichedCache] = useState({});
 
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isLoadingAuth, setIsLoadingAuth] = useState(true);
-
-  useEffect(() => {
-    fetch(`${API_BASE}/auth/status`)
-      .then(res => res.json())
-      .then(data => {
-        setIsAuthenticated(data.authenticated);
-        setIsLoadingAuth(false);
-      })
-      .catch(() => setIsLoadingAuth(false));
-  }, []);
-
-  const addLog = (msg, type = 'info') => {
-    const time = new Date().toLocaleTimeString();
-    setLogs(prev => [{ time, msg, type }, ...prev.slice(0, 10)]);
-  };
-
   const fetchData = async () => {
     try {
       const [statusRes, gamesRes, sessionsRes] = await Promise.all([
-        fetch(`${API_BASE}/status`).then(r => r.json()),
-        fetch(`${API_BASE}/games`).then(r => r.json()),
-        fetch(`${API_BASE}/sessions`).then(r => r.json())
+        requestJson('/status'),
+        requestJson('/games'),
+        requestJson('/sessions')
       ]);
-      if (statusRes.success) setStatus(statusRes);
-      if (gamesRes.success) setGames(gamesRes);
-      if (sessionsRes.success) setSessions(sessionsRes.sessions || []);
+      setStatus(statusRes);
+      setGames(gamesRes);
+      setSessions(sessionsRes.sessions || []);
+      setErrorMessage(previous => previous.startsWith('Failed to connect to the IdleTool backend:') ? '' : previous);
     } catch (err) {
-      addLog(`Failed to connect to backend: ${err.message}`, 'error');
+      setErrorMessage(`Failed to connect to the IdleTool backend: ${err.message}`);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    if (!isAuthenticated) return;
     fetchData();
     const interval = setInterval(fetchData, 2000);
     return () => clearInterval(interval);
-  }, [isAuthenticated]);
+  }, []);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -116,30 +84,31 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (games.installed.length === 0) return;
-    const idsToEnrich = games.installed.filter(g => !enrichedCache[g.appid]).map(g => g.appid).slice(0, 15);
-    if (idsToEnrich.length === 0) return;
-    fetch(`${API_BASE}/enrich-games`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ appids: idsToEnrich }) })
-      .then(r => r.json())
-      .then(data => { if (data.success && data.games) setEnrichedCache(prev => ({ ...prev, ...data.games })); })
-      .catch(() => {});
-  }, [games.installed.length]);
+    if (activeTab !== 'store') return;
+    const query = storeSearchQuery.trim();
+    if (query.length < 2) {
+      setStoreSearchResults([]);
+      setStoreSearchLoading(false);
+      return;
+    }
 
-  const doStoreSearch = useCallback(
-    debounce(async (query) => {
-      if (!query || query.length < 2) { setStoreSearchResults([]); setStoreSearchLoading(false); return; }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
       setStoreSearchLoading(true);
       try {
-        const res = await fetch(`${API_BASE}/search-steam-store?q=${encodeURIComponent(query)}`).then(r => r.json());
-        if (res.success) setStoreSearchResults(res.results || []);
-      } catch (err) {}
-      finally { setStoreSearchLoading(false); }
-    }, 400),
-    []
-  );
+        const res = await requestJson(`/search-steam-store?q=${encodeURIComponent(query)}`);
+        if (!cancelled) setStoreSearchResults(res.results || []);
+      } catch (err) {
+        if (!cancelled) setErrorMessage(`Steam Store search failed: ${err.message}`);
+      } finally {
+        if (!cancelled) setStoreSearchLoading(false);
+      }
+    }, 400);
 
-  useEffect(() => {
-    if (activeTab === 'store') doStoreSearch(storeSearchQuery);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [storeSearchQuery, activeTab]);
 
   const openGameDetail = async (game) => {
@@ -147,35 +116,65 @@ export default function App() {
     setDetailInfo(enrichedCache[game.appid] || null);
     setDetailLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/game-info/${game.appid}`).then(r => r.json());
-      if (res.success && res.gameInfo) {
+      const res = await requestJson(`/game-info/${game.appid}`);
+      if (res.gameInfo) {
         setDetailInfo(res.gameInfo);
         setEnrichedCache(prev => ({ ...prev, [game.appid]: res.gameInfo }));
       }
-    } catch (err) {}
+    } catch (err) {
+      setErrorMessage(`Could not load game details: ${err.message}`);
+    }
     setDetailLoading(false);
   };
 
   const handleStartIdle = async (appId, name) => {
-    addLog(`Initiating Steam IPC for AppID ${appId}...`, 'info');
     try {
-      await fetch(`${API_BASE}/idle/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ appid: appId, name }) });
-      fetchData();
-    } catch (err) {}
+      const response = await requestJson('/idle/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ appid: appId, name }) });
+      const result = response.results?.[0];
+      if (!result?.success) throw new Error(result?.error || 'Steam worker failed to start');
+      await fetchData();
+    } catch (err) {
+      setErrorMessage(`Could not start AppID ${appId}: ${err.message}`);
+    }
   };
 
   const handleStopIdle = async (appId) => {
     try {
-      await fetch(`${API_BASE}/idle/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ appid: appId }) });
-      fetchData();
-    } catch (err) {}
+      await requestJson('/idle/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ appid: appId }) });
+      await fetchData();
+    } catch (err) {
+      setErrorMessage(`Could not stop AppID ${appId}: ${err.message}`);
+    }
   };
 
   const handleStopAll = async () => {
     try {
-      await fetch(`${API_BASE}/idle/stop-all`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
-      fetchData();
-    } catch (err) {}
+      await requestJson('/idle/stop-all', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      await fetchData();
+    } catch (err) {
+      setErrorMessage(`Could not stop all sessions: ${err.message}`);
+    }
+  };
+
+  const handleAddCustomGame = async () => {
+    const appId = Number(customAppId);
+    if (!Number.isInteger(appId) || appId <= 0 || appId > 0xFFFFFFFF) {
+      setErrorMessage('Enter a valid positive Steam AppID.');
+      return;
+    }
+
+    try {
+      await requestJson('/custom-game', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appid: appId })
+      });
+      setCustomAppId('');
+      setShowAddModal(false);
+      await fetchData();
+    } catch (err) {
+      setErrorMessage(`Could not add AppID ${appId}: ${err.message}`);
+    }
   };
 
   const allGames = [
@@ -193,23 +192,19 @@ export default function App() {
         if (!match) return false;
         if (activeTab === 'installed') return g.installed;
         if (activeTab === 'history') return g.source === 'history';
-        if (activeTab === 'store') return g.type === 'store';
         return true;
       });
 
-  const totalElapsedSecs = sessions.reduce((acc, s) => acc + (s.elapsedSeconds || 0), 0);
   const stats = games.libraryStats || {};
+  const pageTitle = {
+    all: 'Dashboard',
+    installed: 'Installed Games',
+    history: 'Library History',
+    store: 'Store Search'
+  }[activeTab] || 'Dashboard';
 
-  if (isLoadingAuth) {
-    return (
-      <div className="min-h-screen bg-[#0e1219] flex items-center justify-center">
-        <div className="text-gray-400">Loading...</div>
-      </div>
-    );
-  }
-
-  if (!isAuthenticated) {
-    return <Login onLoginSuccess={() => setIsAuthenticated(true)} />;
+  if (loading) {
+    return <div className="loading-screen">Loading IdleTool...</div>;
   }
 
   return (
@@ -222,7 +217,7 @@ export default function App() {
           </div>
           <div className="brand-text-block">
             <div className="brand-title">IdleTool</div>
-            <div className="brand-version">v2.4.1</div>
+            <div className="brand-version">v1.0.0</div>
           </div>
         </div>
 
@@ -255,8 +250,8 @@ export default function App() {
               <UserCircle size={22} />
             </div>
             <div>
-              <div style={{ fontSize: '0.85rem', color: '#fff', fontWeight: 500 }}>{status?.activeUser?.personaName || 'Idler Pro'}</div>
-              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Premium Plan</div>
+              <div style={{ fontSize: '0.85rem', color: '#fff', fontWeight: 500 }}>{status?.activeUser?.personaName || 'Steam Client'}</div>
+              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Local Steam session</div>
             </div>
           </div>
           <MoreVertical size={16} color="var(--text-muted)" />
@@ -265,11 +260,17 @@ export default function App() {
 
       {/* MAIN CONTENT AREA */}
       <main className="main-content">
+        {errorMessage && (
+          <div className="error-banner" role="alert">
+            <span>{errorMessage}</span>
+            <button type="button" aria-label="Dismiss error" onClick={() => setErrorMessage('')}><X size={16} /></button>
+          </div>
+        )}
         <header className="main-header">
           <div>
-            <h1 className="page-title">Dashboard</h1>
+            <h1 className="page-title">{pageTitle}</h1>
             <div className="page-subtitle">
-              Welcome back, Idler! <span className="highlight">{sessions.length} games running.</span>
+              Local Steam activity <span className="highlight">{sessions.length} games running.</span>
             </div>
           </div>
           <div className="header-clock">
@@ -299,7 +300,7 @@ export default function App() {
             <div className="stat-icon-wrapper"><Zap size={24} /></div>
             <div className="stat-details">
               <span className="stat-label">TOTAL GAMES</span>
-              <span className="stat-value">{(stats.totalGames/1000).toFixed(2)}K</span>
+              <span className="stat-value">{stats.totalGames || 0}</span>
               <span className="stat-subtext">Discovered history</span>
             </div>
           </div>
@@ -327,9 +328,6 @@ export default function App() {
                 <input type="text" placeholder="Search games..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
               )}
             </div>
-            <button className="icon-btn"><Filter size={16} /> Filter</button>
-            <button className="icon-btn"><Grid size={16} /></button>
-            <button className="icon-btn"><List size={16} /></button>
           </div>
         </div>
 
@@ -369,7 +367,7 @@ export default function App() {
                   {isIdling ? (
                     <button className="manage-btn active" onClick={(e) => { e.stopPropagation(); handleStopIdle(game.appid); }}>Stop</button>
                   ) : (
-                    <button className="manage-btn" onClick={(e) => { e.stopPropagation(); handleStartIdle(game.appid, game.name); }}>Manage</button>
+                    <button className="manage-btn" onClick={(e) => { e.stopPropagation(); handleStartIdle(game.appid, game.name); }}>Start</button>
                   )}
                 </div>
               </div>
@@ -377,22 +375,19 @@ export default function App() {
           })}
         </div>
         
+        {activeTab === 'store' && storeSearchLoading && (
+          <div className="empty-state">Searching the Steam Store...</div>
+        )}
+
         {filteredGames.length > 32 && (
           <div className="footer-actions">
             <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Showing 32 of {filteredGames.length} games</span>
-            <button className="manage-btn" style={{ width: 'auto', padding: '6px 16px' }}>View All Games</button>
           </div>
         )}
       </main>
 
       {/* RIGHT SIDEBAR */}
       <aside className="sidebar-right">
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginBottom: '24px', color: 'var(--text-muted)' }}>
-          <Minus size={16} style={{ cursor: 'pointer' }} />
-          <Square size={14} style={{ cursor: 'pointer' }} />
-          <X size={16} style={{ cursor: 'pointer' }} />
-        </div>
-
         <div className="panel-card">
           <div className="panel-header">
             Current Session
@@ -416,11 +411,7 @@ export default function App() {
             </div>
             <div className="session-stat-row">
               <div className="session-stat-lbl"><ListChecks size={14} /> Tasks active</div>
-              <div className="session-stat-val">{sessions.length * 2}</div>
-            </div>
-            <div className="session-stat-row">
-              <div className="session-stat-lbl"><RotateCw size={14} /> Auto-stop</div>
-              <div className="session-stat-val">{autoStopHours === 'off' ? 'Off' : `${autoStopHours}h`}</div>
+              <div className="session-stat-val">{sessions.length}</div>
             </div>
           </div>
           
@@ -435,7 +426,7 @@ export default function App() {
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          {sessions.map((s, i) => (
+          {sessions.map((s) => (
             <div key={s.appId} className="task-item">
               <div className="task-icon-box">
                 <Gamepad2 size={16} color="var(--accent-teal)" />
@@ -446,8 +437,8 @@ export default function App() {
                 </div>
                 <div className="task-sub">Idling active</div>
               </div>
-              <div className="progress-circle">
-                {Math.min(100, Math.floor((s.elapsedSeconds / 7200) * 100))}%
+              <div className="task-elapsed">
+                {formatTimer(s.elapsedSeconds || 0)}
               </div>
             </div>
           ))}
@@ -458,7 +449,6 @@ export default function App() {
           )}
         </div>
         
-        <button className="manage-btn" style={{ marginTop: '16px' }}>View All Tasks</button>
       </aside>
       
       {/* Detail Modal */}
@@ -471,6 +461,10 @@ export default function App() {
             </div>
             <img src={detailGame.headerImage} alt={detailGame.name} style={{ width: '100%', borderRadius: '10px', marginBottom: '16px' }} />
             
+            {detailLoading && !detailInfo && (
+              <div className="empty-state">Loading game details...</div>
+            )}
+
             {detailInfo && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
@@ -506,9 +500,9 @@ export default function App() {
               <X size={20} color="var(--text-muted)" style={{ cursor: 'pointer' }} onClick={() => setShowAddModal(false)} />
             </div>
             <div className="form-group">
-              <input type="number" className="form-input" placeholder="AppID (e.g. 730)" value={customAppId} onChange={e => setCustomAppId(e.target.value)} />
+              <input type="number" min="1" max="4294967295" step="1" className="form-input" placeholder="AppID (e.g. 730)" value={customAppId} onChange={e => setCustomAppId(e.target.value)} />
             </div>
-            <button className="stop-all-btn" onClick={() => { setShowAddModal(false); /* connect handleAddCustom logic */ }}>Add Game</button>
+            <button className="stop-all-btn" onClick={handleAddCustomGame}>Add Game</button>
           </div>
         </div>
       )}

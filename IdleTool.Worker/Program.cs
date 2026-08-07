@@ -1,4 +1,4 @@
-// SteamWorker - zero-credential local Steam API idler
+// IdleTool worker - zero-credential local Steam API idler
 
 using System;
 using System.IO;
@@ -6,7 +6,7 @@ using System.Text.Json;
 using System.Threading;
 using Steamworks;
 
-namespace SteamWorker
+namespace IdleTool.Worker
 {
     class Program
     {
@@ -20,8 +20,8 @@ namespace SteamWorker
 
             try
             {
-                // Ensure steam_appid.txt exists in current execution directory
-                File.WriteAllText("steam_appid.txt", appId.ToString());
+                string appIdFile = Path.Combine(AppContext.BaseDirectory, "steam_appid.txt");
+                File.WriteAllText(appIdFile, appId.ToString());
                 Environment.SetEnvironmentVariable("SteamAppId", appId.ToString());
                 Environment.SetEnvironmentVariable("SteamGameId", appId.ToString());
 
@@ -42,6 +42,7 @@ namespace SteamWorker
                     success = false, 
                     error = $"SteamClient.IsValid returned false for AppID {appId}. Please verify the Steam Desktop Client is currently running and logged into an account." 
                 }));
+                TryShutdownSteam();
                 return;
             }
 
@@ -57,34 +58,43 @@ namespace SteamWorker
                 startTime = DateTime.UtcNow.ToString("o")
             }));
 
-            bool running = true;
+            using ManualResetEventSlim stopSignal = new(false);
             Console.CancelKeyPress += (sender, eventArgs) => {
                 eventArgs.Cancel = true;
-                running = false;
+                stopSignal.Set();
             };
 
-            while (running)
+            while (!stopSignal.Wait(1000))
             {
                 try
                 {
                     SteamClient.RunCallbacks();
                 }
-                catch { }
-
-                Thread.Sleep(1000);
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Steam callback error: {ex.Message}");
+                }
             }
 
-            try
-            {
-                SteamClient.Shutdown();
-            }
-            catch { }
+            TryShutdownSteam();
 
             Console.WriteLine(JsonSerializer.Serialize(new {
                 success = true,
                 status = "STOPPED",
                 appid = appId
             }));
+        }
+
+        private static void TryShutdownSteam()
+        {
+            try
+            {
+                SteamClient.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Steam shutdown error: {ex.Message}");
+            }
         }
     }
 }

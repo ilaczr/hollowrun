@@ -1,20 +1,28 @@
 const { app, BrowserWindow, utilityProcess } = require('electron');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 
+const SERVER_URL = 'http://127.0.0.1:3824';
+const instanceToken = crypto.randomBytes(32).toString('hex');
 let mainWindow;
 let serverProcess;
 
 const checkServer = () => {
   return new Promise((resolve) => {
-    const req = http.get('http://localhost:3824/api/status', (res) => {
-      if (res.statusCode === 200) {
+    const req = http.get(`${SERVER_URL}/api/status`, (res) => {
+      res.resume();
+      if (res.statusCode === 200 && res.headers['x-idletool-instance'] === instanceToken) {
         resolve(true);
       } else {
         resolve(false);
       }
     });
     req.on('error', () => resolve(false));
+    req.setTimeout(1000, () => {
+      req.destroy();
+      resolve(false);
+    });
     req.end();
   });
 };
@@ -42,13 +50,19 @@ function createWindow() {
     },
     webPreferences: {
       nodeIntegration: false,
-      contextIsolation: true
+      contextIsolation: true,
+      sandbox: true,
+      webviewTag: false
     },
-    icon: path.join(__dirname, 'frontend/public/favicon.svg')
+    icon: path.join(__dirname, 'frontend/public/idletool.svg')
   });
 
   mainWindow.setMenuBarVisibility(false);
-  mainWindow.loadURL('http://localhost:3824');
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url !== SERVER_URL && url !== `${SERVER_URL}/`) event.preventDefault();
+  });
+  mainWindow.loadURL(SERVER_URL);
 
   mainWindow.on('closed', function () {
     mainWindow = null;
@@ -61,8 +75,13 @@ app.whenReady().then(async () => {
   
   // Use utilityProcess to run the backend safely in a packaged app without a console window
   serverProcess = utilityProcess.fork(serverPath, [], {
-    env: { ...process.env, ELECTRON_APP: 'true' },
+    env: { ...process.env, ELECTRON_APP: 'true', IDLETOOL_INSTANCE_TOKEN: instanceToken },
     stdio: 'pipe'
+  });
+  serverProcess.stdout?.on('data', (data) => console.log(data.toString().trimEnd()));
+  serverProcess.stderr?.on('data', (data) => console.error(data.toString().trimEnd()));
+  serverProcess.on('exit', (code) => {
+    if (code !== 0) console.error(`Backend process exited with code ${code}.`);
   });
 
   // Wait for the backend API to be ready
@@ -87,9 +106,10 @@ app.on('window-all-closed', function () {
 });
 
 // Ensure backend is killed when Electron exits
-app.on('quit', () => {
+app.on('before-quit', () => {
   if (serverProcess) {
     console.log('Terminating backend server...');
-    serverProcess.kill('SIGINT');
+    serverProcess.kill();
+    serverProcess = null;
   }
 });

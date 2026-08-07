@@ -1,56 +1,67 @@
 # IdleTool
 
-A zero-credential, local Steam idling tool for Windows that connects directly to your active Steam desktop client instance using Steamworks IPC.
+IdleTool is a local Windows utility that asks the running Steam desktop client to report selected AppIDs as active. It does not need a Steam password, Steam Guard code, API key, or third-party license account.
 
-## 🌟 Key Features
-- **0 Credentials Required**: Works directly with your running Steam desktop client session. No account password, Steam Guard 2FA, or API keys needed.
-- **Deep Library Auto-Discovery**: Auto-detects installed Steam games from manifest files and parses your full historical library and playtime data directly from your local `localconfig.vdf`.
-- **Active Profile Scanner**: Reads your active Steam profile persona name and SteamID64.
-- **Steam Store Search & Enrichment**: Live querying of the entire Steam catalog to find any game. Enriches local games with metadata from the Steam API (Metacritic scores, genres, trading card drops).
-- **Multi-Game Idling**: Idle single games or batch-idle multiple games simultaneously directly through Steam IPC.
-- **Auto-Stop Timers**: Configurable session limiters (e.g. 30m, 1h, 2h, 3.5h, 5h).
-- **Custom AppIDs**: Add any Steam AppID with automatic header banner artwork loading from Steam CDN.
-- **Glassmorphism UI**: High-aesthetic React frontend running locally at `http://localhost:3824`.
+## What it does
 
----
+- Detects the Steam installation from the current user's registry or standard install paths.
+- Reads local Steam manifests, `loginusers.vdf`, and `localconfig.vdf` to show installed games and play history.
+- Queries Steam's public Store API for game metadata and search results.
+- Starts one isolated `IdleTool.Worker` process per selected AppID, up to 32 concurrent sessions.
+- Stores only local metadata caches and custom AppIDs under `backend/`.
 
-## 🚀 Tutorial: How to Use IdleTool
+## Security and privacy
 
-This app uses your running Steam instance to trick Steam into thinking you are playing a game. This is useful for getting trading card drops or increasing your playtime hours without actually installing or running the game.
+- The control API binds only to `127.0.0.1:3824` and validates host/origin headers.
+- The application never asks for or transmits account credentials.
+- Outbound application requests are limited to Steam Store API/CDN endpoints.
+- Electron renderer isolation and a restrictive Content Security Policy are enabled.
+- Worker processes run as the current user and communicate with the already-running Steam client through Steamworks.
 
-### Step 1: Getting Started
-1. Open your **Steam Desktop Client** and make sure you are logged into your Steam account.
-2. Double-click **`IdleTool.exe`** (or use the Setup Installer) in the `dist-electron` folder if you built it, or simply double-click the `.exe` that you downloaded.
-3. The app will open in a native, gorgeous Desktop Window!
+## Requirements
 
-### Step 2: Exploring the Dashboard
-When you open the dashboard, the tool will automatically scan your Steam installation and extract:
-- Your **Installed** games.
-- Your entire **History** of games you have ever played on this account, including your historical playtime and when you last played them.
-- A **Library Stats** dashboard showing your total hours played across all Steam games!
+- Windows with the Steam desktop client running and logged in.
+- Node.js 22.12 or newer for Electron development and packaging.
+- .NET 10 runtime for the included Steam worker.
+- .NET 10 SDK only when rebuilding the Steam worker or launcher.
 
-The UI will automatically enrich these games with data directly from Steam, showing Metacritic scores, Genres, and if the game has **Steam Trading Cards**.
+## Run from source
 
-### Step 3: Start Idling!
-You don't need to have the game installed to idle it.
-- **To idle a game from your library/presets**: Browse your Installed, History, or Presets tab and click the **Start Idling** button on any game. 
-- **To batch idle**: Check the checkboxes on the game cards, and click the **Start Selected** button at the top. Note: Steam limits you to idling around 30-32 games at a time.
+```powershell
+npm ci
+npm run setup
+npm run build:frontend
+npm start
+```
 
-### Step 4: Finding ANY Game on Steam
-Want to idle a game you don't even own yet, or can't find in your history?
-1. Click the **🔍 Steam Store** tab.
-2. Type in the name of *any* game on Steam (e.g., "Elden Ring" or "Counter-Strike").
-3. The results will instantly pop up. Click "Start Idling" directly from the search results!
+Alternatively, `start-idletool.bat` installs missing backend/frontend dependencies, builds missing artifacts, and starts the browser-based dashboard.
 
-### Step 5: Managing Active Sessions & Auto-Stop
-- Under the **Active** tab, you can see all currently idling games with a live elapsed timer.
-- Look at your Steam Friends List—it will say you are "In-Game" for all these games!
-- In the top bar, you can set an **Auto-Stop Timer** (e.g., 2 hours). If set, any game that idles for 2 hours will automatically be stopped.
-- To stop everything immediately, click the red **Stop All** button.
+## Development
 
----
+Run the backend and Vite frontend together:
 
-## 💻 Tech Stack
-- **Backend**: Node.js, Express
-- **Frontend**: React, Vite, Vanilla CSS (Custom Glassmorphism Design)
-- **Worker Process**: C# (.NET 10), Facepunch.Steamworks
+```powershell
+npm run setup
+npm run dev
+```
+
+The Vite development server is available only on `127.0.0.1` and proxies `/api` to the local backend.
+
+## Build
+
+```powershell
+npm ci
+npm run setup
+npm run build:worker
+npm run build
+```
+
+Electron packages are written to `dist-electron/`.
+
+## Project structure
+
+- `backend/`: local Express API, Steam library scanning, Store API access, and worker lifecycle management.
+- `frontend/`: React/Vite dashboard.
+- `IdleTool.Worker/`: minimal .NET Steamworks process used for each active AppID.
+- `IdleTool.Launcher/`: optional .NET launcher for the browser-hosted dashboard.
+- `electron-main.cjs`: Electron main process.

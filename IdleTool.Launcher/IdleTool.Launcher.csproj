@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>IdleTool</AssemblyName>
-    <RootNamespace>IdleToolLauncher</RootNamespace>
+    <RootNamespace>IdleTool.Launcher</RootNamespace>
   </PropertyGroup>
 
 </Project>

@@ -1,115 +1,72 @@
 import express from 'express';
-import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
-import { spawn, execSync } from 'child_process';
+import { spawn, execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
-import fetch from 'node-fetch';
-import dotenv from 'dotenv';
+import { MAX_IDLE_SESSIONS, normalizeGameName, parseAppId } from './validation.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-dotenv.config({ path: path.join(__dirname, '.env') });
-
 const app = express();
+const HOST = '127.0.0.1';
 const PORT = 3824;
+const BASE_URL = `http://${HOST}:${PORT}`;
+const rawInstanceToken = process.env.IDLETOOL_INSTANCE_TOKEN || '';
+const INSTANCE_TOKEN = /^[a-f0-9]{64}$/.test(rawInstanceToken) ? rawInstanceToken : null;
+const ALLOWED_HOSTS = new Set([`${HOST}:${PORT}`, `localhost:${PORT}`]);
+const ALLOWED_ORIGINS = new Set([
+  BASE_URL,
+  `http://localhost:${PORT}`,
+  'http://127.0.0.1:5173',
+  'http://localhost:5173'
+]);
 
-app.use(cors());
-app.use(express.json());
+app.disable('x-powered-by');
 
-// ===================================================================
-// KEYAUTH CONFIG & AUTHENTICATION MIDDLEWARE
-// ===================================================================
-let isAuthenticated = process.env.BYPASS_KEYAUTH === 'true';
-let keyAuthSessionId = null;
+// The API controls local processes and reads local Steam metadata. Keep it
+// accessible only through the local dashboard and reject DNS rebinding.
+app.use((req, res, next) => {
+  const host = req.get('host');
+  const origin = req.get('origin');
 
-const KEYAUTH_API = 'https://keyauth.win/api/1.2/';
+  if (!ALLOWED_HOSTS.has(host)) {
+    return res.status(403).json({ success: false, error: 'Invalid host' });
+  }
+  if (origin && !ALLOWED_ORIGINS.has(origin)) {
+    return res.status(403).json({ success: false, error: 'Invalid origin' });
+  }
 
-async function initKeyAuth() {
-    if (isAuthenticated) return true;
-    try {
-        const params = new URLSearchParams();
-        params.append('type', 'init');
-        params.append('ver', process.env.KEYAUTH_VERSION || '1.0');
-        params.append('name', process.env.KEYAUTH_APP_NAME || '');
-        params.append('ownerid', process.env.KEYAUTH_OWNER_ID || '');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  if (INSTANCE_TOKEN) res.setHeader('X-IdleTool-Instance', INSTANCE_TOKEN);
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; connect-src 'self'; img-src 'self' data: https://cdn.akamai.steamstatic.com https://store.cloudflare.steamstatic.com; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+  );
+  next();
+});
 
-        const response = await fetch(KEYAUTH_API, { method: 'POST', body: params });
-        const data = await response.json();
-        
-        if (data.success) {
-            keyAuthSessionId = data.sessionid;
-            return true;
-        } else {
-            console.error('KeyAuth Init Failed:', data.message);
-            return false;
-        }
-    } catch (err) {
-        console.error('KeyAuth request error:', err);
-        return false;
-    }
+app.use(express.json({ limit: '32kb' }));
+
+async function fetchJson(url, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      headers: { Accept: 'application/json', 'User-Agent': 'IdleTool/1.0' },
+      signal: controller.signal
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
-
-app.post('/api/auth/login', async (req, res) => {
-    if (isAuthenticated) return res.json({ success: true, message: 'Already authenticated' });
-
-    const { loginType, licenseKey, username, password } = req.body;
-    
-    if (loginType === 'license' && !licenseKey) {
-        return res.status(400).json({ success: false, error: 'License key is required' });
-    }
-    if (loginType === 'userpass' && (!username || !password)) {
-        return res.status(400).json({ success: false, error: 'Username and password are required' });
-    }
-
-    if (!keyAuthSessionId) {
-        const initialized = await initKeyAuth();
-        if (!initialized) return res.status(500).json({ success: false, error: 'Failed to initialize KeyAuth' });
-    }
-
-    try {
-        const params = new URLSearchParams();
-        
-        if (loginType === 'license') {
-            params.append('type', 'license');
-            params.append('key', licenseKey);
-        } else {
-            params.append('type', 'login');
-            params.append('username', username);
-            params.append('pass', password);
-        }
-
-        params.append('sessionid', keyAuthSessionId);
-        params.append('name', process.env.KEYAUTH_APP_NAME || '');
-        params.append('ownerid', process.env.KEYAUTH_OWNER_ID || '');
-
-        const response = await fetch(KEYAUTH_API, { method: 'POST', body: params });
-        const data = await response.json();
-
-        if (data.success) {
-            isAuthenticated = true;
-            return res.json({ success: true, message: 'Successfully authenticated!' });
-        } else {
-            return res.status(401).json({ success: false, error: data.message || 'Invalid credentials' });
-        }
-    } catch (err) {
-        return res.status(500).json({ success: false, error: 'Internal server error during authentication' });
-    }
-});
-
-app.get('/api/auth/status', (req, res) => {
-    res.json({ authenticated: isAuthenticated });
-});
-
-// Middleware to protect API routes
-const requireAuth = (req, res, next) => {
-    if (req.path.startsWith('/api/auth')) return next(); // allow auth routes
-    if (!isAuthenticated) return res.status(401).json({ success: false, error: 'Unauthorized: KeyAuth License Required' });
-    next();
-};
-
-app.use('/api', requireAuth);
 
 // Serve compiled static frontend from dist folder
 const distPath = path.join(__dirname, '..', 'frontend', 'dist');
@@ -128,7 +85,8 @@ let gameInfoCache = {};
 function loadCache() {
   try {
     if (fs.existsSync(CACHE_FILE)) {
-      gameInfoCache = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+      const parsed = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+      gameInfoCache = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
     }
   } catch (e) { gameInfoCache = {}; }
 }
@@ -150,10 +108,8 @@ async function fetchSteamGameInfo(appId) {
 
   try {
     const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&l=english`;
-    const response = await fetch(url);
-    if (!response.ok) return cached || null;
-
-    const data = await response.json();
+    const data = await fetchJson(url);
+    if (!data) return cached || null;
     const entry = data[String(appId)];
 
     if (!entry || !entry.success || !entry.data) return cached || null;
@@ -174,7 +130,7 @@ async function fetchSteamGameInfo(appId) {
       releaseDate: d.release_date ? d.release_date.date : null,
       isFree: d.is_free || false,
       price: d.price_overview ? (d.price_overview.final / 100).toFixed(2) : (d.is_free ? 'Free' : null),
-      headerImage: d.header_image || `https://cdn.akamai.steamstatic.com/steam/apps/${appId}/header.jpg`,
+      headerImage: `https://cdn.akamai.steamstatic.com/steam/apps/${appId}/header.jpg`,
       backgroundImage: d.background_raw || d.background || null,
       capsuleImage: d.capsule_image || null,
       website: d.website || null,
@@ -368,7 +324,15 @@ const CUSTOM_GAMES_FILE = path.join(__dirname, 'custom_games.json');
 function loadCustomGames() {
   try {
     if (fs.existsSync(CUSTOM_GAMES_FILE)) {
-      return JSON.parse(fs.readFileSync(CUSTOM_GAMES_FILE, 'utf8'));
+      const parsed = JSON.parse(fs.readFileSync(CUSTOM_GAMES_FILE, 'utf8'));
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .map(game => {
+          const appId = parseAppId(game?.appid);
+          return appId === null ? null : { appid: appId, name: normalizeGameName(game?.name, appId) };
+        })
+        .filter(Boolean)
+        .slice(0, 1000);
     }
   } catch (err) {}
   return [];
@@ -385,10 +349,15 @@ function saveCustomGames(games) {
 // ===================================================================
 function getSteamPath() {
   try {
-    const cmd = `powershell -Command "Get-ItemProperty -Path 'HKCU:\\Software\\Valve\\Steam' -Name 'SteamPath' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty SteamPath"`;
-    const output = execSync(cmd, { encoding: 'utf8' }).trim();
-    if (output && fs.existsSync(output)) {
-      return path.normalize(output);
+    const output = execFileSync(
+      'reg.exe',
+      ['query', 'HKCU\\Software\\Valve\\Steam', '/v', 'SteamPath'],
+      { encoding: 'utf8', windowsHide: true }
+    );
+    const match = output.match(/SteamPath\s+REG_\w+\s+(.+)$/im);
+    const registryPath = match?.[1]?.trim();
+    if (registryPath && fs.existsSync(registryPath)) {
+      return path.normalize(registryPath);
     }
   } catch (e) {}
 
@@ -540,9 +509,11 @@ function scanFullLibrary(steamPath) {
 // ===================================================================
 function getWorkerExecutablePath() {
   const possiblePaths = [
-    path.join(__dirname, '..', 'SteamWorker', 'publish', 'SteamWorker.exe'),
-    path.join(__dirname, '..', 'SteamWorker', 'bin', 'Release', 'net10.0', 'win-x64', 'SteamWorker.exe'),
-    path.join(__dirname, '..', 'SteamWorker', 'bin', 'Debug', 'net10.0', 'SteamWorker.exe')
+    path.join(__dirname, '..', 'IdleTool.Worker', 'publish', 'IdleTool.Worker.exe'),
+    // Keep the existing prebuilt worker usable until the renamed project is rebuilt.
+    path.join(__dirname, '..', 'IdleTool.Worker', 'publish', 'SteamWorker.exe'),
+    path.join(__dirname, '..', 'IdleTool.Worker', 'bin', 'Release', 'net10.0', 'win-x64', 'IdleTool.Worker.exe'),
+    path.join(__dirname, '..', 'IdleTool.Worker', 'bin', 'Debug', 'net10.0', 'IdleTool.Worker.exe')
   ];
   for (const p of possiblePaths) {
     if (fs.existsSync(p)) return p;
@@ -556,17 +527,30 @@ function startIdleSession(appId, gameName = '') {
       const existing = activeSessions.get(appId);
       return resolve({ success: true, message: 'Already idling', session: getSessionInfo(existing) });
     }
+    if (activeSessions.size >= MAX_IDLE_SESSIONS) {
+      return resolve({ success: false, error: `At most ${MAX_IDLE_SESSIONS} games can be idled at once.` });
+    }
 
     const workerExe = getWorkerExecutablePath();
     if (!workerExe) {
-      return resolve({ success: false, error: 'SteamWorker.exe not found. Compile the SteamWorker project first.' });
+      return resolve({ success: false, error: 'IdleTool worker not found. Build the IdleTool.Worker project first.' });
     }
 
     const workerDir = path.join(__dirname, 'workers', `app_${appId}`);
     if (!fs.existsSync(workerDir)) fs.mkdirSync(workerDir, { recursive: true });
 
     const exeDir = path.dirname(workerExe);
-    for (const f of ['SteamWorker.exe', 'SteamWorker.dll', 'SteamWorker.deps.json', 'SteamWorker.runtimeconfig.json', 'Facepunch.Steamworks.Win64.dll', 'steam_api64.dll']) {
+    const workerExecutableName = path.basename(workerExe);
+    const workerBaseName = path.basename(workerExe, path.extname(workerExe));
+    const workerFiles = [
+      workerExecutableName,
+      `${workerBaseName}.dll`,
+      `${workerBaseName}.deps.json`,
+      `${workerBaseName}.runtimeconfig.json`,
+      'Facepunch.Steamworks.Win64.dll',
+      'steam_api64.dll'
+    ];
+    for (const f of workerFiles) {
       const src = path.join(exeDir, f);
       const dst = path.join(workerDir, f);
       if (fs.existsSync(src)) {
@@ -576,41 +560,72 @@ function startIdleSession(appId, gameName = '') {
 
     let child;
     try {
-      child = spawn(path.join(workerDir, 'SteamWorker.exe'), [appId.toString()], {
+      child = spawn(path.join(workerDir, workerExecutableName), [appId.toString()], {
         cwd: workerDir,
-        env: { ...process.env, SteamAppId: appId.toString(), SteamGameId: appId.toString() }
+        env: { ...process.env, SteamAppId: appId.toString(), SteamGameId: appId.toString() },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true
       });
     } catch (err) {
       return resolve({ success: false, error: `Failed to spawn process: ${err.message}` });
     }
 
     const sessionData = {
-      appId, gameName: gameName || `AppID ${appId}`, process: child,
+      appId, gameName: normalizeGameName(gameName, appId), process: child,
       startTime: Date.now(), personaName: '', steamId: '', status: 'STARTING', workerDir
     };
     activeSessions.set(appId, sessionData);
 
     let resolved = false;
+    let stdoutBuffer = '';
+    const finishStart = (result) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(startupTimeout);
+      resolve(result);
+    };
+    const startupTimeout = setTimeout(() => {
+      stopIdleSession(appId);
+      finishStart({ success: false, error: 'Steam worker timed out while starting.' });
+    }, 15000);
+
+    const processWorkerMessage = (line) => {
+      if (!line) return;
+      try {
+        const json = JSON.parse(line);
+        if (json.status === 'IDLING' && json.success) {
+          sessionData.status = 'IDLING';
+          sessionData.personaName = typeof json.personaName === 'string' ? json.personaName.slice(0, 100) : '';
+          sessionData.steamId = typeof json.steamId === 'string' ? json.steamId.slice(0, 32) : '';
+          finishStart({ success: true, session: getSessionInfo(sessionData) });
+        } else if (json.success === false) {
+          stopIdleSession(appId);
+          finishStart({ success: false, error: json.error || 'Failed to initialize' });
+        }
+      } catch (e) {
+        // Ignore non-JSON diagnostics from the worker.
+      }
+    };
+
     child.stdout.on('data', (data) => {
-      for (const line of data.toString().trim().split('\n')) {
-        try {
-          const json = JSON.parse(line.trim());
-          if (json.status === 'IDLING' && json.success) {
-            sessionData.status = 'IDLING';
-            sessionData.personaName = json.personaName || '';
-            sessionData.steamId = json.steamId || '';
-            if (!resolved) { resolved = true; resolve({ success: true, session: getSessionInfo(sessionData) }); }
-          } else if (json.success === false && !resolved) {
-            resolved = true; stopIdleSession(appId);
-            resolve({ success: false, error: json.error || 'Failed to initialize' });
-          }
-        } catch (e) {}
+      stdoutBuffer += data.toString();
+      let newlineIndex;
+      while ((newlineIndex = stdoutBuffer.indexOf('\n')) >= 0) {
+        const line = stdoutBuffer.slice(0, newlineIndex).trim();
+        stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+        processWorkerMessage(line);
       }
     });
-    child.stderr.on('data', (data) => console.error(`[Worker ${appId}]:`, data.toString()));
-    child.on('exit', (code) => {
+
+    child.stderr.on('data', (data) => console.error(`[Worker ${appId}]:`, data.toString().slice(0, 2000)));
+    child.once('error', (err) => {
       activeSessions.delete(appId);
-      if (!resolved) { resolved = true; resolve({ success: false, error: `Worker exited with code ${code}` }); }
+      finishStart({ success: false, error: `Worker process error: ${err.message}` });
+    });
+    child.on('exit', (code) => {
+      processWorkerMessage(stdoutBuffer.trim());
+      activeSessions.delete(appId);
+      finishStart({ success: false, error: `Worker exited with code ${code}` });
     });
   });
 }
@@ -619,9 +634,13 @@ function stopIdleSession(appId) {
   if (!activeSessions.has(appId)) return { success: false, message: 'Not running' };
   const session = activeSessions.get(appId);
   try {
-    if (session.process && !session.process.killed) {
+    if (session.process && session.process.exitCode === null) {
       session.process.kill('SIGINT');
-      setTimeout(() => { try { if (!session.process.killed) session.process.kill('SIGKILL'); } catch(e){} }, 1000);
+      setTimeout(() => {
+        try {
+          if (session.process.exitCode === null) session.process.kill('SIGKILL');
+        } catch (e) {}
+      }, 1000);
     }
   } catch (e) {}
   activeSessions.delete(appId);
@@ -649,8 +668,9 @@ app.get('/api/status', (req, res) => {
   res.json({
     success: true,
     steamInstalled: !!steamPath,
-    steamPath: steamPath || 'Not found',
-    activeUser: activeUser || { personaName: 'Steam Client', steamId: 'N/A' },
+    activeUser: activeUser
+      ? { personaName: activeUser.personaName, steamId: activeUser.steamId }
+      : { personaName: 'Steam Client', steamId: 'N/A' },
     activeSessionsCount: activeSessions.size
   });
 });
@@ -697,8 +717,8 @@ app.get('/api/games', (req, res) => {
 
 // Fetch detailed Steam info for a specific game
 app.get('/api/game-info/:appid', async (req, res) => {
-  const appId = parseInt(req.params.appid, 10);
-  if (isNaN(appId)) return res.status(400).json({ success: false, error: 'Invalid AppID' });
+  const appId = parseAppId(req.params.appid);
+  if (appId === null) return res.status(400).json({ success: false, error: 'Invalid AppID' });
 
   const info = await fetchSteamGameInfo(appId);
   if (!info) return res.json({ success: false, error: 'Could not fetch game info from Steam' });
@@ -707,36 +727,47 @@ app.get('/api/game-info/:appid', async (req, res) => {
 
 // Batch enrich multiple games with Steam metadata
 app.post('/api/enrich-games', async (req, res) => {
-  const { appids } = req.body;
-  if (!appids || !Array.isArray(appids) || appids.length === 0) {
+  const { appids } = req.body ?? {};
+  if (!Array.isArray(appids) || appids.length === 0) {
     return res.status(400).json({ success: false, error: 'Provide an array of appids' });
   }
 
   // Limit to 20 per batch request
-  const limited = appids.slice(0, 20).map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+  const limited = [...new Set(appids.slice(0, 20).map(parseAppId).filter(id => id !== null))];
+  if (limited.length === 0) {
+    return res.status(400).json({ success: false, error: 'No valid AppIDs provided' });
+  }
   const enriched = await batchFetchGameInfo(limited);
   res.json({ success: true, games: enriched });
 });
 
 // Steam Store live search
 app.get('/api/search-steam-store', async (req, res) => {
-  const query = req.query.q || '';
-  if (!query || query.length < 2) return res.json({ success: true, results: [] });
+  const query = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : '';
+  if (query.length < 2) return res.json({ success: true, results: [] });
 
   try {
     const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(query)}&l=english&cc=US`;
-    const response = await fetch(url);
-    if (!response.ok) return res.json({ success: false, error: 'Steam Store API error' });
-    const data = await response.json();
-    const results = (data.items || []).map(item => ({
-      appid: item.id, name: item.name,
-      headerImage: `https://cdn.akamai.steamstatic.com/steam/apps/${item.id}/header.jpg`,
-      price: item.price ? (item.price.final / 100).toFixed(2) : 'Free',
-      category: 'Steam Store Search'
-    }));
+    const data = await fetchJson(url);
+    if (!data) return res.status(502).json({ success: false, error: 'Steam Store API error' });
+    const results = (Array.isArray(data.items) ? data.items : [])
+      .slice(0, 50)
+      .map(item => {
+        const appId = parseAppId(item?.id);
+        if (appId === null) return null;
+        const finalPrice = Number(item?.price?.final);
+        return {
+          appid: appId,
+          name: normalizeGameName(item?.name, appId),
+          headerImage: `https://cdn.akamai.steamstatic.com/steam/apps/${appId}/header.jpg`,
+          price: Number.isFinite(finalPrice) ? (finalPrice / 100).toFixed(2) : 'Free',
+          category: 'Steam Store Search'
+        };
+      })
+      .filter(Boolean);
     res.json({ success: true, results });
   } catch (err) {
-    res.json({ success: false, error: err.message });
+    res.status(502).json({ success: false, error: 'Steam Store request failed' });
   }
 });
 
@@ -747,23 +778,34 @@ app.get('/api/sessions', (req, res) => {
 
 // Start Idle
 app.post('/api/idle/start', async (req, res) => {
-  const { appid, appids, name } = req.body;
-  const targetIds = appids || (appid ? [appid] : []);
-  if (targetIds.length === 0) return res.status(400).json({ success: false, error: 'No AppID specified' });
+  const { appid, appids, name } = req.body ?? {};
+  if (appids !== undefined && !Array.isArray(appids)) {
+    return res.status(400).json({ success: false, error: 'appids must be an array' });
+  }
+
+  const requestedIds = Array.isArray(appids) ? appids : (appid !== undefined ? [appid] : []);
+  if (requestedIds.length === 0) return res.status(400).json({ success: false, error: 'No AppID specified' });
+  if (requestedIds.length > MAX_IDLE_SESSIONS) {
+    return res.status(400).json({ success: false, error: `At most ${MAX_IDLE_SESSIONS} AppIDs can be started at once` });
+  }
+
+  const targetIds = [...new Set(requestedIds.map(parseAppId))];
+  if (targetIds.includes(null)) {
+    return res.status(400).json({ success: false, error: 'One or more AppIDs are invalid' });
+  }
 
   const results = [];
-  for (const id of targetIds) {
-    const numId = parseInt(id, 10);
-    results.push({ appid: numId, ...(await startIdleSession(numId, name)) });
+  for (const appId of targetIds) {
+    results.push({ appid: appId, ...(await startIdleSession(appId, name)) });
   }
   res.json({ success: true, results });
 });
 
 // Stop Idle
 app.post('/api/idle/stop', (req, res) => {
-  const { appid } = req.body;
-  if (!appid) return res.status(400).json({ success: false, error: 'No AppID' });
-  res.json(stopIdleSession(parseInt(appid, 10)));
+  const appId = parseAppId(req.body?.appid);
+  if (appId === null) return res.status(400).json({ success: false, error: 'Valid AppID required' });
+  res.json(stopIdleSession(appId));
 });
 
 // Stop All
@@ -775,12 +817,16 @@ app.post('/api/idle/stop-all', (req, res) => {
 
 // Add Custom Game
 app.post('/api/custom-game', (req, res) => {
-  const { appid, name } = req.body;
-  if (!appid || isNaN(appid)) return res.status(400).json({ success: false, error: 'Valid AppID required' });
-  const numAppId = parseInt(appid, 10);
+  const { appid, name } = req.body ?? {};
+  const numAppId = parseAppId(appid);
+  if (numAppId === null) return res.status(400).json({ success: false, error: 'Valid AppID required' });
+  const gameName = normalizeGameName(name, numAppId);
   const custom = loadCustomGames();
-  if (!custom.some(c => c.appid === numAppId)) { custom.push({ appid: numAppId, name: name || `AppID ${numAppId}` }); saveCustomGames(custom); }
-  res.json({ success: true, appid: numAppId, name: name || `AppID ${numAppId}` });
+  if (!custom.some(c => c.appid === numAppId)) {
+    custom.push({ appid: numAppId, name: gameName });
+    saveCustomGames(custom);
+  }
+  res.json({ success: true, appid: numAppId, name: gameName });
 });
 
 // SPA fallback
@@ -788,19 +834,19 @@ app.get('*', (req, res) => {
   if (fs.existsSync(path.join(distPath, 'index.html'))) {
     res.sendFile(path.join(distPath, 'index.html'));
   } else {
-    res.send('Steam Idler Backend active. Frontend dist not found.');
+    res.status(503).send('IdleTool backend is running, but the frontend build was not found.');
   }
 });
 
-app.listen(PORT, async () => {
-    console.log(`IdleTool server running at http://localhost:${PORT}`);
-    
-    if (!process.env.ELECTRON_APP) {
-        try {
-            const open = (await import('open')).default;
-            await open(`http://localhost:${PORT}`);
-        } catch (err) {
-            console.log(`Failed to open browser automatically: ${err.message}`);
-        }
-    }
+const server = app.listen(PORT, HOST, () => {
+  console.log(`IdleTool server running at ${BASE_URL}`);
 });
+
+function shutdown() {
+  for (const appId of Array.from(activeSessions.keys())) stopIdleSession(appId);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 2000).unref();
+}
+
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);
