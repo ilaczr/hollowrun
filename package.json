@@ -1,0 +1,38 @@
+{
+  "name": "idletool",
+  "version": "1.0.0",
+  "description": "A zero-credential, local Steam idling tool for Windows that connects directly to your active Steam desktop client instance using Steamworks IPC.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win"
+  },
+  "build": {
+    "appId": "com.idletool.app",
+    "productName": "IdleTool",
+    "asar": false,
+    "win": {
+      "target": ["nsis", "portable"],
+      "icon": "frontend/public/favicon.svg"
+    },
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "main.js",
+      "backend/**/*",
+      "frontend/dist/**/*",
+      "frontend/public/**/*",
+      "SteamWorker/publish/**/*"
+    ]
+  },
+  "keywords": [],
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "concurrently": "^10.0.4",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "wait-on": "^9.1.0"
+  }
+}
