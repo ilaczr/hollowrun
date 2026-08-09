@@ -40,3 +40,7 @@ The output is written to `dist-electron\HollowRun <version>.exe`. See [COMMANDS.
 - `electron-main.cjs` — Electron application lifecycle and local backend startup.
 
 Generated dependencies, caches, publish folders, and packaged output are intentionally excluded from Git.
+
+## Release Download
+
+[Releases](https://github.com/ju6697/hollowrun/releases)
