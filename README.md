@@ -30,7 +30,7 @@ npm.cmd run setup
 npm.cmd run build
 ```
 
-The output is written to `dist-electron\HollowRun <version>.exe`. See [COMMANDS.MD](COMMANDS.MD) for the complete build notes and [VERSIONING.md](VERSIONING.md) for the release-version workflow.
+The output is written to `dist-electron\HollowRun <version>.exe`. See [COMMANDS.MD](COMMANDS.MD) for the complete build notes
 
 ## Project structure
 
