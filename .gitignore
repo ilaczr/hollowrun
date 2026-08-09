@@ -1,0 +1,61 @@
+# Node dependencies
+node_modules/
+
+# Environment and machine-local configuration
+.env
+.env.*
+!.env.example
+*.local
+
+# JavaScript build and tooling output
+dist/
+dist-ssr/
+dist-electron/
+coverage/
+.nyc_output/
+.vite/
+*.tsbuildinfo
+
+# Generated .NET output
+bin/
+obj/
+HollowRun.Worker/publish/
+HollowRun.Splash/publish/
+*.user
+*.suo
+*.pdb
+*.userosscache
+*.sln.docstates
+TestResults/
+
+# HollowRun runtime state and caches
+backend/workers/
+game_info_cache.json
+game-info.json
+owned-library.json
+custom_games.json
+window-state.json
+
+# Logs and temporary files
+*.log
+*.pid
+*.pid.lock
+*.tmp
+*.temp
+*.bak
+*.orig
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editors and operating systems
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+COMMANDS.MD
+TODO.MD

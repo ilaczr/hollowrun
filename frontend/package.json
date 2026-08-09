@@ -1,0 +1,25 @@
+{
+  "name": "hollowrun-frontend",
+  "private": true,
+  "version": "1.2.9",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "lint": "oxlint"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "dependencies": {
+    "lucide-react": "^1.28.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "oxlint": "^1.75.0",
+    "vite": "^8.2.0"
+  }
+}

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
+  <title>HollowRun</title>
+  <defs>
+    <filter id="hollowrun-glow" x="-24" y="-24" width="304" height="304" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="outer-blur" />
+      <feComponentTransfer in="outer-blur" result="outer-glow">
+        <feFuncA type="linear" slope="0.28" />
+      </feComponentTransfer>
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2.5" result="inner-blur" />
+      <feComponentTransfer in="inner-blur" result="inner-glow">
+        <feFuncA type="linear" slope="0.52" />
+      </feComponentTransfer>
+      <feMerge>
+        <feMergeNode in="outer-glow" />
+        <feMergeNode in="inner-glow" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+  <g fill="#FFFFFF" filter="url(#hollowrun-glow)">
+    <path d="M31 42H63V111H101V42H133V214H101V143H63V214H31V42Z"/>
+    <path fill-rule="evenodd" d="M101 42H167C201 42 219 60 219 90C219 113 207 129 184 136L225 214H189L153 141H133V214H101V42ZM133 70V113H165C181 113 189 105 189 91C189 77 181 70 165 70H133Z"/>
+  </g>
+</svg>
