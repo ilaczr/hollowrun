@@ -12,7 +12,7 @@ const app = express();
 const HOST = '127.0.0.1';
 const PORT = 3824;
 const BASE_URL = `http://${HOST}:${PORT}`;
-const rawInstanceToken = process.env.IDLETOOL_INSTANCE_TOKEN || '';
+const rawInstanceToken = process.env.HOLLOWRUN_INSTANCE_TOKEN || '';
 const INSTANCE_TOKEN = /^[a-f0-9]{64}$/.test(rawInstanceToken) ? rawInstanceToken : null;
 const ALLOWED_HOSTS = new Set([`${HOST}:${PORT}`, `localhost:${PORT}`]);
 const ALLOWED_ORIGINS = new Set([
@@ -42,7 +42,7 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-  if (INSTANCE_TOKEN) res.setHeader('X-IdleTool-Instance', INSTANCE_TOKEN);
+  if (INSTANCE_TOKEN) res.setHeader('X-HollowRun-Instance', INSTANCE_TOKEN);
   res.setHeader(
     'Content-Security-Policy',
     "default-src 'self'; connect-src 'self'; img-src 'self' data: https://cdn.akamai.steamstatic.com https://store.cloudflare.steamstatic.com; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
@@ -58,7 +58,7 @@ async function fetchJson(url, timeoutMs = 10000) {
 
   try {
     const response = await fetch(url, {
-      headers: { Accept: 'application/json', 'User-Agent': 'IdleTool/1.0' },
+      headers: { Accept: 'application/json', 'User-Agent': 'HollowRun/1.0' },
       signal: controller.signal
     });
     if (!response.ok) return null;
@@ -509,11 +509,9 @@ function scanFullLibrary(steamPath) {
 // ===================================================================
 function getWorkerExecutablePath() {
   const possiblePaths = [
-    path.join(__dirname, '..', 'IdleTool.Worker', 'publish', 'IdleTool.Worker.exe'),
-    // Keep the existing prebuilt worker usable until the renamed project is rebuilt.
-    path.join(__dirname, '..', 'IdleTool.Worker', 'publish', 'SteamWorker.exe'),
-    path.join(__dirname, '..', 'IdleTool.Worker', 'bin', 'Release', 'net10.0', 'win-x64', 'IdleTool.Worker.exe'),
-    path.join(__dirname, '..', 'IdleTool.Worker', 'bin', 'Debug', 'net10.0', 'IdleTool.Worker.exe')
+    path.join(__dirname, '..', 'HollowRun.Worker', 'publish', 'HollowRun.Worker.exe'),
+    path.join(__dirname, '..', 'HollowRun.Worker', 'bin', 'Release', 'net10.0', 'win-x64', 'HollowRun.Worker.exe'),
+    path.join(__dirname, '..', 'HollowRun.Worker', 'bin', 'Debug', 'net10.0', 'HollowRun.Worker.exe')
   ];
   for (const p of possiblePaths) {
     if (fs.existsSync(p)) return p;
@@ -533,7 +531,7 @@ function startIdleSession(appId, gameName = '') {
 
     const workerExe = getWorkerExecutablePath();
     if (!workerExe) {
-      return resolve({ success: false, error: 'IdleTool worker not found. Build the IdleTool.Worker project first.' });
+      return resolve({ success: false, error: 'HollowRun worker not found. Build the HollowRun.Worker project first.' });
     }
 
     const workerDir = path.join(__dirname, 'workers', `app_${appId}`);
@@ -834,12 +832,12 @@ app.get('*', (req, res) => {
   if (fs.existsSync(path.join(distPath, 'index.html'))) {
     res.sendFile(path.join(distPath, 'index.html'));
   } else {
-    res.status(503).send('IdleTool backend is running, but the frontend build was not found.');
+    res.status(503).send('HollowRun backend is running, but the frontend build was not found.');
   }
 });
 
 const server = app.listen(PORT, HOST, () => {
-  console.log(`IdleTool server running at ${BASE_URL}`);
+  console.log(`HollowRun server running at ${BASE_URL}`);
 });
 
 function shutdown() {

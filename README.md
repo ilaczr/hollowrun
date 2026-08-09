@@ -1,13 +1,13 @@
-# IdleTool
+# HollowRun
 
-IdleTool is a local Windows utility that asks the running Steam desktop client to report selected AppIDs as active. It does not need a Steam password, Steam Guard code, API key, or third-party license account.
+HollowRun is a local Windows utility that asks the running Steam desktop client to report selected AppIDs as active. It does not need a Steam password, Steam Guard code, API key, or third-party license account.
 
 ## What it does
 
 - Detects the Steam installation from the current user's registry or standard install paths.
 - Reads local Steam manifests, `loginusers.vdf`, and `localconfig.vdf` to show installed games and play history.
 - Queries Steam's public Store API for game metadata and search results.
-- Starts one isolated `IdleTool.Worker` process per selected AppID, up to 32 concurrent sessions.
+- Starts one isolated `HollowRun.Worker` process per selected AppID, up to 32 concurrent sessions.
 - Stores only local metadata caches and custom AppIDs under `backend/`.
 
 ## Security and privacy
@@ -34,7 +34,7 @@ npm run build:frontend
 npm start
 ```
 
-Alternatively, `start-idletool.bat` installs missing backend/frontend dependencies, builds missing artifacts, and starts the browser-based dashboard.
+Alternatively, `start-hollowrun.bat` installs missing backend/frontend dependencies, builds missing artifacts, and starts the browser-based dashboard.
 
 ## Development
 
@@ -62,6 +62,6 @@ Electron packages are written to `dist-electron/`.
 
 - `backend/`: local Express API, Steam library scanning, Store API access, and worker lifecycle management.
 - `frontend/`: React/Vite dashboard.
-- `IdleTool.Worker/`: minimal .NET Steamworks process used for each active AppID.
-- `IdleTool.Launcher/`: optional .NET launcher for the browser-hosted dashboard.
+- `HollowRun.Worker/`: minimal .NET Steamworks process used for each active AppID.
+- `HollowRun.Launcher/`: optional .NET launcher for the browser-hosted dashboard.
 - `electron-main.cjs`: Electron main process.

@@ -1,9 +1,9 @@
 @echo off
 setlocal
-title IdleTool
+title HollowRun
 
 echo ===================================================
-echo                    IDLETOOL
+echo                    HOLLOWRUN
 echo ===================================================
 echo.
 
@@ -20,15 +20,14 @@ if not exist "%~dp0backend\node_modules\express\package.json" (
 )
 
 echo [2/4] Checking Steam worker...
-set "IDLETOOL_WORKER=%~dp0IdleTool.Worker\publish\IdleTool.Worker.exe"
-if not exist "%IDLETOOL_WORKER%" if exist "%~dp0IdleTool.Worker\publish\SteamWorker.exe" set "IDLETOOL_WORKER=%~dp0IdleTool.Worker\publish\SteamWorker.exe"
-if not exist "%IDLETOOL_WORKER%" (
+set "HOLLOWRUN_WORKER=%~dp0HollowRun.Worker\publish\HollowRun.Worker.exe"
+if not exist "%HOLLOWRUN_WORKER%" (
     where dotnet >nul 2>&1
     if errorlevel 1 (
-        echo [Error] The .NET 10 SDK is required to build IdleTool.Worker.
+        echo [Error] The .NET 10 SDK is required to build HollowRun.Worker.
         exit /b 1
     )
-    dotnet publish "%~dp0IdleTool.Worker\IdleTool.Worker.csproj" -c Release -r win-x64 --self-contained false -o "%~dp0IdleTool.Worker\publish"
+    dotnet publish "%~dp0HollowRun.Worker\HollowRun.Worker.csproj" -c Release -r win-x64 --self-contained false -o "%~dp0HollowRun.Worker\publish"
     if errorlevel 1 exit /b 1
 )
 
@@ -42,6 +41,6 @@ if not exist "%~dp0frontend\dist\index.html" (
     if errorlevel 1 exit /b 1
 )
 
-echo [4/4] Launching IdleTool...
+echo [4/4] Launching HollowRun...
 start "" "http://127.0.0.1:3824"
 node "%~dp0backend\server.js"

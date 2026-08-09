@@ -1,4 +1,4 @@
-// IdleTool worker - zero-credential local Steam API idler
+// HollowRun worker - zero-credential local Steam API idler
 
 using System;
 using System.IO;
@@ -6,7 +6,7 @@ using System.Text.Json;
 using System.Threading;
 using Steamworks;
 
-namespace IdleTool.Worker
+namespace HollowRun.Worker
 {
     class Program
     {

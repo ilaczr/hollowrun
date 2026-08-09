@@ -5,8 +5,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AssemblyName>IdleTool</AssemblyName>
-    <RootNamespace>IdleTool.Launcher</RootNamespace>
+    <AssemblyName>HollowRun</AssemblyName>
+    <RootNamespace>HollowRun.Launcher</RootNamespace>
   </PropertyGroup>
 
 </Project>

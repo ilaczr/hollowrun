@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
 import { 
-  Gamepad2, LayoutDashboard, CheckSquare, UserCircle, Cloud, 
-  Settings, Activity, Clock, ListChecks, Zap, Hexagon, Search,
-  MoreVertical, Square, X
+  Gamepad2, CheckSquare, UserCircle, Settings, Activity, Clock, ListChecks, Zap, Hexagon, Search,
+  Square, X
 } from 'lucide-react';
 
 const API_BASE = '/api';
@@ -30,27 +29,30 @@ function formatPlaytime(minutes) {
   return `${hrs}h`;
 }
 
+function getPaginationItems(currentPage, totalPages) {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, index) => index + 1);
+  }
+  if (currentPage <= 4) {
+    return [1, 2, 3, 4, 5, 'ellipsis-end', totalPages];
+  }
+  if (currentPage >= totalPages - 3) {
+    return [1, 'ellipsis-start', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+  }
+  return [1, 'ellipsis-start', currentPage - 1, currentPage, currentPage + 1, 'ellipsis-end', totalPages];
+}
+
 export default function App() {
   const [status, setStatus] = useState(null);
-  const [games, setGames] = useState({ installed: [], presets: [], custom: [], libraryStats: null });
+  const [games, setGames] = useState({ installed: [], presets: [], libraryStats: null });
   const [sessions, setSessions] = useState([]);
-  const [activeTab, setActiveTab] = useState('all'); // maps to Sidebar: Dashboard (all), Games (installed), Tasks (presets), etc.
+  const [activeTab, setActiveTab] = useState('installed');
   const [searchQuery, setSearchQuery] = useState('');
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [customAppId, setCustomAppId] = useState('');
+  const [gamePage, setGamePage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState('');
   const [currentTime, setCurrentTime] = useState(new Date());
   
-  const [storeSearchQuery, setStoreSearchQuery] = useState('');
-  const [storeSearchResults, setStoreSearchResults] = useState([]);
-  const [storeSearchLoading, setStoreSearchLoading] = useState(false);
-  
-  const [detailGame, setDetailGame] = useState(null);
-  const [detailInfo, setDetailInfo] = useState(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [enrichedCache, setEnrichedCache] = useState({});
-
   const fetchData = async () => {
     try {
       const [statusRes, gamesRes, sessionsRes] = await Promise.all([
@@ -61,9 +63,9 @@ export default function App() {
       setStatus(statusRes);
       setGames(gamesRes);
       setSessions(sessionsRes.sessions || []);
-      setErrorMessage(previous => previous.startsWith('Failed to connect to the IdleTool backend:') ? '' : previous);
+      setErrorMessage(previous => previous.startsWith('Failed to connect to the HollowRun backend:') ? '' : previous);
     } catch (err) {
-      setErrorMessage(`Failed to connect to the IdleTool backend: ${err.message}`);
+      setErrorMessage(`Failed to connect to the HollowRun backend: ${err.message}`);
     } finally {
       setLoading(false);
     }
@@ -83,51 +85,9 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  useEffect(() => {
-    if (activeTab !== 'store') return;
-    const query = storeSearchQuery.trim();
-    if (query.length < 2) {
-      setStoreSearchResults([]);
-      setStoreSearchLoading(false);
-      return;
-    }
 
-    let cancelled = false;
-    const timer = setTimeout(async () => {
-      setStoreSearchLoading(true);
-      try {
-        const res = await requestJson(`/search-steam-store?q=${encodeURIComponent(query)}`);
-        if (!cancelled) setStoreSearchResults(res.results || []);
-      } catch (err) {
-        if (!cancelled) setErrorMessage(`Steam Store search failed: ${err.message}`);
-      } finally {
-        if (!cancelled) setStoreSearchLoading(false);
-      }
-    }, 400);
 
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [storeSearchQuery, activeTab]);
-
-  const openGameDetail = async (game) => {
-    setDetailGame(game);
-    setDetailInfo(enrichedCache[game.appid] || null);
-    setDetailLoading(true);
-    try {
-      const res = await requestJson(`/game-info/${game.appid}`);
-      if (res.gameInfo) {
-        setDetailInfo(res.gameInfo);
-        setEnrichedCache(prev => ({ ...prev, [game.appid]: res.gameInfo }));
-      }
-    } catch (err) {
-      setErrorMessage(`Could not load game details: ${err.message}`);
-    }
-    setDetailLoading(false);
-  };
-
-  const handleStartIdle = async (appId, name) => {
+  const handleStartRun = async (appId, name) => {
     try {
       const response = await requestJson('/idle/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ appid: appId, name }) });
       const result = response.results?.[0];
@@ -138,7 +98,7 @@ export default function App() {
     }
   };
 
-  const handleStopIdle = async (appId) => {
+  const handleStopRun = async (appId) => {
     try {
       await requestJson('/idle/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ appid: appId }) });
       await fetchData();
@@ -156,59 +116,56 @@ export default function App() {
     }
   };
 
-  const handleAddCustomGame = async () => {
-    const appId = Number(customAppId);
-    if (!Number.isInteger(appId) || appId <= 0 || appId > 0xFFFFFFFF) {
-      setErrorMessage('Enter a valid positive Steam AppID.');
-      return;
-    }
-
-    try {
-      await requestJson('/custom-game', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ appid: appId })
-      });
-      setCustomAppId('');
-      setShowAddModal(false);
-      await fetchData();
-    } catch (err) {
-      setErrorMessage(`Could not add AppID ${appId}: ${err.message}`);
-    }
-  };
-
   const allGames = [
     ...games.installed.map(g => ({ ...g, type: g.source || 'installed' })),
-    ...games.presets.map(g => ({ ...g, type: 'preset' })),
-    ...games.custom.map(g => ({ ...g, type: 'custom' }))
+    ...games.presets.map(g => ({ ...g, type: 'preset' }))
   ];
 
   const activeSessionMap = new Map(sessions.map(s => [s.appId, s]));
 
-  const filteredGames = activeTab === 'store'
-    ? storeSearchResults.map(g => ({ ...g, type: 'store' }))
-    : allGames.filter(g => {
-        const match = g.name.toLowerCase().includes(searchQuery.toLowerCase()) || g.appid.toString().includes(searchQuery);
-        if (!match) return false;
-        if (activeTab === 'installed') return g.installed;
-        if (activeTab === 'history') return g.source === 'history';
-        return true;
-      });
+  const filteredGames = allGames.filter(g => {
+    const match = g.name.toLowerCase().includes(searchQuery.toLowerCase()) || g.appid.toString().includes(searchQuery);
+    if (!match) return false;
+    if (activeTab === 'installed') return g.installed;
+    if (activeTab === 'library') return true;
+    return true;
+  });
+
+  const gamePageSize = 8;
+  const pageCount = Math.max(1, Math.ceil(filteredGames.length / gamePageSize));
+  const safeGamePage = Math.min(gamePage, pageCount);
+  const paginationItems = getPaginationItems(safeGamePage, pageCount);
+  const pagedGames = filteredGames.slice((safeGamePage - 1) * gamePageSize, safeGamePage * gamePageSize);
+  const pageStart = filteredGames.length === 0 ? 0 : (safeGamePage - 1) * gamePageSize + 1;
+  const pageEnd = Math.min(filteredGames.length, safeGamePage * gamePageSize);
+
+  useEffect(() => {
+    setGamePage(1);
+  }, [activeTab, searchQuery]);
+  useEffect(() => {
+    setGamePage(page => Math.min(page, pageCount));
+  }, [pageCount]);
 
   const stats = games.libraryStats || {};
   const pageTitle = {
-    all: 'Dashboard',
     installed: 'Installed Games',
-    history: 'Library History',
-    store: 'Store Search'
-  }[activeTab] || 'Dashboard';
+    library: 'Library'
+  }[activeTab] || 'Library';
+
+  const isElectron = navigator.userAgent.includes('Electron');
 
   if (loading) {
-    return <div className="loading-screen">Loading IdleTool...</div>;
+    return (
+      <div className={`loading-screen ${isElectron ? 'electron-window' : ''}`}>
+        {isElectron && <div className="window-drag-region" aria-hidden="true" />}
+        <span>Loading HollowRun...</span>
+      </div>
+    );
   }
 
   return (
-    <div className="app-layout">
+    <div className={`app-layout ${isElectron ? 'electron-window' : ''}`}>
+      {isElectron && <div className="window-drag-region" aria-hidden="true" />}
       {/* LEFT SIDEBAR */}
       <aside className="sidebar-left">
         <div className="brand-section">
@@ -216,31 +173,19 @@ export default function App() {
             <Gamepad2 size={20} color="#fff" />
           </div>
           <div className="brand-text-block">
-            <div className="brand-title">IdleTool</div>
+            <div className="brand-title">HollowRun</div>
             <div className="brand-version">v1.0.0</div>
           </div>
         </div>
 
         <div className="nav-menu">
-          <div className={`nav-item ${activeTab === 'all' ? 'active' : ''}`} onClick={() => setActiveTab('all')}>
-            <LayoutDashboard size={18} className="nav-icon" />
-            <span>Dashboard</span>
-          </div>
           <div className={`nav-item ${activeTab === 'installed' ? 'active' : ''}`} onClick={() => setActiveTab('installed')}>
             <Gamepad2 size={18} className="nav-icon" />
             <span>Installed Games</span>
           </div>
-          <div className={`nav-item ${activeTab === 'history' ? 'active' : ''}`} onClick={() => setActiveTab('history')}>
+          <div className={`nav-item ${activeTab === 'library' ? 'active' : ''}`} onClick={() => setActiveTab('library')}>
             <CheckSquare size={18} className="nav-icon" />
-            <span>Library History</span>
-          </div>
-          <div className={`nav-item ${activeTab === 'store' ? 'active' : ''}`} onClick={() => setActiveTab('store')}>
-            <Cloud size={18} className="nav-icon" />
-            <span>Store Search</span>
-          </div>
-          <div className="nav-item" onClick={() => setShowAddModal(true)}>
-            <Settings size={18} className="nav-icon" />
-            <span>Add Custom</span>
+            <span>Library</span>
           </div>
         </div>
 
@@ -254,7 +199,6 @@ export default function App() {
               <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Local Steam session</div>
             </div>
           </div>
-          <MoreVertical size={16} color="var(--text-muted)" />
         </div>
       </aside>
 
@@ -267,12 +211,25 @@ export default function App() {
           </div>
         )}
         <header className="main-header">
-          <div>
+          <div className="page-heading">
             <h1 className="page-title">{pageTitle}</h1>
             <div className="page-subtitle">
               Local Steam activity <span className="highlight">{sessions.length} games running.</span>
             </div>
           </div>
+
+          <div className="top-search-wrap">
+            <div className="search-box search-box-top">
+              <Search className="search-icon" />
+              <input type="text" placeholder="Search games or AppID..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+              {searchQuery && (
+                <button type="button" className="search-clear" aria-label="Clear search" onClick={() => setSearchQuery('')}>
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+          </div>
+
           <div className="header-clock">
             <Clock size={14} />
             {currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
@@ -309,7 +266,7 @@ export default function App() {
             <div className="stat-details">
               <span className="stat-label">INSTALLED</span>
               <span className="stat-value">{stats.installedGames || 0}</span>
-              <span className="stat-subtext">Ready to idle</span>
+              <span className="stat-subtext">Installed locally</span>
             </div>
           </div>
         </div>
@@ -319,38 +276,24 @@ export default function App() {
           <div className="section-title">
             Games <span className="badge">{sessions.length} Running</span>
           </div>
-          <div className="controls-group">
-            <div className="search-box">
-              <Search className="search-icon" />
-              {activeTab === 'store' ? (
-                <input type="text" placeholder="Search Steam store..." value={storeSearchQuery} onChange={(e) => setStoreSearchQuery(e.target.value)} />
-              ) : (
-                <input type="text" placeholder="Search games..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
-              )}
-            </div>
-          </div>
         </div>
 
         {/* Games Grid */}
         <div className="games-grid">
-          {filteredGames.slice(0, 32).map(game => {
-            const isIdling = activeSessionMap.has(game.appid);
+          {pagedGames.map(game => {
+            const isRunning = activeSessionMap.has(game.appid);
             const session = activeSessionMap.get(game.appid);
             
             return (
-              <div key={game.appid} className="game-card" onClick={() => openGameDetail(game)}>
+              <div key={game.appid} className="game-card">
                 <div className="game-image-container">
                   <img src={game.headerImage} alt={game.name} className="game-image" onError={(e) => { e.target.src = 'https://store.cloudflare.steamstatic.com/public/images/v6/logo_steam.svg'; e.target.style.objectFit = 'contain'; }} />
                   <div className="game-gradient"></div>
-                  <div className={`status-dot ${!isIdling ? 'inactive' : ''}`}></div>
-                  <div style={{ position: 'absolute', top: '10px', right: '10px', color: 'rgba(255,255,255,0.7)' }}>
-                    <MoreVertical size={16} />
-                  </div>
                 </div>
                 <div className="game-info">
                   <div className="game-title" title={game.name}>{game.name}</div>
                   
-                  {isIdling && session ? (
+                  {isRunning && session ? (
                     <div className="game-timer">
                       <Clock size={12} /> {formatTimer(session.elapsedSeconds || 0)}
                     </div>
@@ -361,27 +304,50 @@ export default function App() {
                   )}
 
                   <div className="game-subtext">
-                    {isIdling ? 'Idling Active' : (game.installed ? 'Ready: Installed' : (game.source === 'history' ? 'Ready: Play History' : 'Steam Store'))}
+                    {isRunning ? 'Running Active' : (game.installed ? 'Ready: Installed' : (game.source === 'history' ? 'Ready: Play History' : 'Steam Store'))}
                   </div>
 
-                  {isIdling ? (
-                    <button className="manage-btn active" onClick={(e) => { e.stopPropagation(); handleStopIdle(game.appid); }}>Stop</button>
+                  {isRunning ? (
+                    <button className="manage-btn active" onClick={(e) => { e.stopPropagation(); handleStopRun(game.appid); }}>Stop</button>
                   ) : (
-                    <button className="manage-btn" onClick={(e) => { e.stopPropagation(); handleStartIdle(game.appid, game.name); }}>Start</button>
+                    <button className="manage-btn" onClick={(e) => { e.stopPropagation(); handleStartRun(game.appid, game.name); }}>Start</button>
                   )}
                 </div>
               </div>
             );
           })}
         </div>
-        
-        {activeTab === 'store' && storeSearchLoading && (
-          <div className="empty-state">Searching the Steam Store...</div>
-        )}
 
-        {filteredGames.length > 32 && (
+        {pageCount > 1 && (
+          <nav className="page-navigation" aria-label={`${pageTitle} pages`}>
+            <button type="button" className="page-nav-btn" aria-label="Previous page" title="Previous page" disabled={safeGamePage <= 1} onClick={() => setGamePage(safeGamePage - 1)}>
+              <span aria-hidden="true">&lsaquo;</span>
+            </button>
+            <div className="page-number-row">
+              {paginationItems.map(item => typeof item === 'number' ? (
+                <button
+                  type="button"
+                  key={item}
+                  className={`page-number ${safeGamePage === item ? 'active' : ''}`}
+                  aria-current={safeGamePage === item ? 'page' : undefined}
+                  aria-label={`Page ${item}`}
+                  onClick={() => setGamePage(item)}
+                >
+                  {item}
+                </button>
+              ) : (
+                <span key={item} className="page-ellipsis" aria-hidden="true">&hellip;</span>
+              ))}
+            </div>
+            <button type="button" className="page-nav-btn" aria-label="Next page" title="Next page" disabled={safeGamePage >= pageCount} onClick={() => setGamePage(safeGamePage + 1)}>
+              <span aria-hidden="true">&rsaquo;</span>
+            </button>
+          </nav>
+        )}
+        
+        {filteredGames.length > gamePageSize && (
           <div className="footer-actions">
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Showing 32 of {filteredGames.length} games</span>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Showing {pageStart}&ndash;{pageEnd} of {filteredGames.length} games</span>
           </div>
         )}
       </main>
@@ -415,9 +381,11 @@ export default function App() {
             </div>
           </div>
           
-          <button className="stop-all-btn" onClick={handleStopAll}>
-            <Square size={16} fill="currentColor" /> Stop All
-          </button>
+          {sessions.length > 0 && (
+            <button className="stop-all-btn" onClick={handleStopAll}>
+              <Square size={16} fill="currentColor" /> Stop All
+            </button>
+          )}
         </div>
 
         <div className="panel-header" style={{ marginBottom: '12px', padding: '0 4px' }}>
@@ -435,11 +403,14 @@ export default function App() {
                 <div className="task-title" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '120px' }}>
                   {s.gameName}
                 </div>
-                <div className="task-sub">Idling active</div>
+                <div className="task-sub">Running active</div>
               </div>
               <div className="task-elapsed">
                 {formatTimer(s.elapsedSeconds || 0)}
               </div>
+              <button className="task-remove-btn" aria-label={`Remove ${s.gameName} from task list`} onClick={(e) => { e.stopPropagation(); handleStopRun(s.appId); }}>
+                <X size={11} />
+              </button>
             </div>
           ))}
           {sessions.length === 0 && (
@@ -450,62 +421,6 @@ export default function App() {
         </div>
         
       </aside>
-      
-      {/* Detail Modal */}
-      {detailGame && (
-        <div className="modal-overlay" onClick={() => { setDetailGame(null); setDetailInfo(null); }}>
-          <div className="modal-card" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2 style={{ fontSize: '1.15rem', color: '#fff' }}>{detailGame.name}</h2>
-              <X size={20} color="var(--text-muted)" style={{ cursor: 'pointer' }} onClick={() => { setDetailGame(null); setDetailInfo(null); }} />
-            </div>
-            <img src={detailGame.headerImage} alt={detailGame.name} style={{ width: '100%', borderRadius: '10px', marginBottom: '16px' }} />
-            
-            {detailLoading && !detailInfo && (
-              <div className="empty-state">Loading game details...</div>
-            )}
-
-            {detailInfo && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                  <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: '8px', padding: '10px' }}>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Developer</div>
-                    <div style={{ fontSize: '0.88rem', color: '#fff', marginTop: '2px' }}>{detailInfo.developers?.join(', ') || 'Unknown'}</div>
-                  </div>
-                  <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: '8px', padding: '10px' }}>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Price</div>
-                    <div style={{ fontSize: '0.88rem', color: '#fff', marginTop: '2px' }}>{detailInfo.isFree ? 'Free to Play' : (detailInfo.price ? `$${detailInfo.price}` : 'N/A')}</div>
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '8px' }}>
-                  {activeSessionMap.has(detailGame.appid) ? (
-                    <button className="manage-btn active" style={{ width: 'auto', padding: '8px 24px' }} onClick={() => { handleStopIdle(detailGame.appid); setDetailGame(null); }}>Stop Idling</button>
-                  ) : (
-                    <button className="stop-all-btn" style={{ width: 'auto', padding: '8px 24px' }} onClick={() => { handleStartIdle(detailGame.appid, detailGame.name); setDetailGame(null); }}>Start Idling</button>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-      
-      {/* Add Custom Modal */}
-      {showAddModal && (
-        <div className="modal-overlay" onClick={() => setShowAddModal(false)}>
-          <div className="modal-card" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2 style={{ fontSize: '1.15rem', color: '#fff' }}>Add Custom Steam AppID</h2>
-              <X size={20} color="var(--text-muted)" style={{ cursor: 'pointer' }} onClick={() => setShowAddModal(false)} />
-            </div>
-            <div className="form-group">
-              <input type="number" min="1" max="4294967295" step="1" className="form-input" placeholder="AppID (e.g. 730)" value={customAppId} onChange={e => setCustomAppId(e.target.value)} />
-            </div>
-            <button className="stop-all-btn" onClick={handleAddCustomGame}>Add Game</button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

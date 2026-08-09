@@ -1,7 +1,7 @@
 {
-  "name": "idletool-backend",
+  "name": "hollowrun-backend",
   "version": "1.0.0",
-  "description": "Local API server for IdleTool",
+  "description": "Local API server for HollowRun",
   "main": "server.js",
   "type": "module",
   "scripts": {

@@ -4,7 +4,7 @@ using System.IO;
 using System.Net.Http;
 using System.Threading.Tasks;
 
-namespace IdleTool.Launcher
+namespace HollowRun.Launcher
 {
     public class Program
     {
@@ -12,10 +12,10 @@ namespace IdleTool.Launcher
 
         public static async Task Main(string[] args)
         {
-            Console.Title = "IdleTool - Backend Server";
+            Console.Title = "HollowRun - Backend Server";
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("========================================");
-            Console.WriteLine("           IdleTool Launcher");
+            Console.WriteLine("           HollowRun Launcher");
             Console.WriteLine("========================================");
             Console.ResetColor();
 
@@ -31,7 +31,7 @@ namespace IdleTool.Launcher
             if (!File.Exists(serverPath))
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"[Error] Could not find the IdleTool backend: {serverPath}");
+                Console.WriteLine($"[Error] Could not find the HollowRun backend: {serverPath}");
                 Console.ReadLine();
                 return;
             }
@@ -63,7 +63,7 @@ namespace IdleTool.Launcher
             {
                 if (nodeProcess is { HasExited: false }) nodeProcess.Kill(entireProcessTree: true);
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("[Error] The IdleTool backend did not become ready.");
+                Console.WriteLine("[Error] The HollowRun backend did not become ready.");
                 Console.ReadLine();
                 return;
             }
