@@ -1,13 +1,11 @@
 {
   "name": "hollowrun-frontend",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.2.9",
   "type": "module",
   "scripts": {
-    "dev": "vite",
     "build": "vite build",
-    "lint": "oxlint",
-    "preview": "vite preview"
+    "lint": "oxlint"
   },
   "engines": {
     "node": ">=20.19.0"

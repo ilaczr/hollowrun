@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'" />
+    <title>Starting HollowRun</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: #010203;
+        color: #f3f5f7;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-width: 100vw;
+        min-height: 100vh;
+        margin: 0;
+        overflow: hidden;
+        background: #010203;
+      }
+
+      .titlebar {
+        position: fixed;
+        z-index: 2;
+        top: 0;
+        right: 138px;
+        left: 0;
+        height: 28px;
+        background: #030405;
+        -webkit-app-region: drag;
+        user-select: none;
+      }
+
+      main {
+        display: grid;
+        min-height: 100vh;
+        padding: 52px 24px 24px;
+        place-items: center;
+      }
+
+      .loader {
+        display: grid;
+        width: min(380px, calc(100vw - 48px));
+        grid-template-columns: 42px minmax(0, 1fr);
+        gap: 10px 12px;
+        align-items: center;
+      }
+
+      .mark {
+        display: grid;
+        width: 42px;
+        height: 42px;
+        place-items: center;
+      }
+
+      .mark img {
+        display: block;
+        width: 42px;
+        height: 42px;
+        object-fit: contain;
+        filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.5)) drop-shadow(0 0 9px rgba(255, 255, 255, 0.22));
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 17px;
+        font-weight: 650;
+        letter-spacing: -0.01em;
+        text-shadow: 0 0 5px rgba(255, 255, 255, 0.38), 0 0 14px rgba(255, 255, 255, 0.14);
+      }
+
+      .action {
+        grid-column: 1 / -1;
+        min-height: 18px;
+        margin: 0;
+        color: #c7d5e0;
+        font-size: 12px;
+        line-height: 18px;
+      }
+
+      .progress {
+        position: relative;
+        grid-column: 1 / -1;
+        height: 4px;
+        margin-top: 9px;
+        overflow: hidden;
+        border-radius: 2px;
+        background: #15191e;
+      }
+
+      .progress-fill {
+        display: block;
+        width: 8%;
+        height: 100%;
+        border-radius: inherit;
+        background: #078ff2;
+        transition: width 180ms ease-out;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .progress-fill {
+          transition: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="titlebar" aria-hidden="true"></div>
+    <main>
+      <div class="loader" role="status" aria-live="polite">
+        <div class="mark" aria-hidden="true">
+          <img src="./frontend/public/hollowrun.svg" alt="" />
+        </div>
+        <div>
+          <h1>HollowRun</h1>
+        </div>
+        <div id="startup-progress" class="progress" role="progressbar" aria-label="Startup progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="8">
+          <span id="startup-progress-fill" class="progress-fill"></span>
+        </div>
+        <p id="startup-action" class="action">Preparing application window...</p>
+      </div>
+    </main>
+  </body>
+</html>

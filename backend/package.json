@@ -1,13 +1,11 @@
 {
   "name": "hollowrun-backend",
-  "version": "1.0.0",
+  "version": "1.2.9",
   "description": "Local API server for HollowRun",
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "test": "node --test validation.test.js"
+    "test": "node --test validation.test.js steam-profile.test.js"
   },
   "engines": {
     "node": ">=20.19.0"

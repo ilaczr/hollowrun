@@ -2,11 +2,31 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { spawn, execFileSync } from 'child_process';
+import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { MAX_IDLE_SESSIONS, normalizeGameName, parseAppId } from './validation.js';
+import {
+  fetchPublicSteamProfileBackground,
+  getActiveSteamProfileBackground,
+  isAllowedSteamProfileBackgroundUrl,
+  isAllowedSteamProfileBackgroundVideoUrl
+} from './steam-profile.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function readAppVersion() {
+  try {
+    const rootPackage = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(rootPackage?.version)
+      ? rootPackage.version
+      : '0.0.0';
+  } catch (error) {
+    return '0.0.0';
+  }
+}
+
+const APP_VERSION = readAppVersion();
 
 const app = express();
 const HOST = '127.0.0.1';
@@ -14,12 +34,13 @@ const PORT = 3824;
 const BASE_URL = `http://${HOST}:${PORT}`;
 const rawInstanceToken = process.env.HOLLOWRUN_INSTANCE_TOKEN || '';
 const INSTANCE_TOKEN = /^[a-f0-9]{64}$/.test(rawInstanceToken) ? rawInstanceToken : null;
-const ALLOWED_HOSTS = new Set([`${HOST}:${PORT}`, `localhost:${PORT}`]);
+const IS_DESKTOP_RUNTIME = process.env.ELECTRON_APP === 'true';
+if (!IS_DESKTOP_RUNTIME || !INSTANCE_TOKEN) {
+  throw new Error('HollowRun backend can only be started by the authenticated desktop application.');
+}
+const ALLOWED_HOSTS = new Set([`${HOST}:${PORT}`]);
 const ALLOWED_ORIGINS = new Set([
-  BASE_URL,
-  `http://localhost:${PORT}`,
-  'http://127.0.0.1:5173',
-  'http://localhost:5173'
+  BASE_URL
 ]);
 
 app.disable('x-powered-by');
@@ -33,6 +54,9 @@ app.use((req, res, next) => {
   if (!ALLOWED_HOSTS.has(host)) {
     return res.status(403).json({ success: false, error: 'Invalid host' });
   }
+  if (req.get('x-hollowrun-instance') !== INSTANCE_TOKEN) {
+    return res.status(403).json({ success: false, error: 'Desktop authentication required' });
+  }
   if (origin && !ALLOWED_ORIGINS.has(origin)) {
     return res.status(403).json({ success: false, error: 'Invalid origin' });
   }
@@ -45,7 +69,7 @@ app.use((req, res, next) => {
   if (INSTANCE_TOKEN) res.setHeader('X-HollowRun-Instance', INSTANCE_TOKEN);
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self'; connect-src 'self'; img-src 'self' data: https://cdn.akamai.steamstatic.com https://store.cloudflare.steamstatic.com; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    "default-src 'self'; connect-src 'self'; img-src 'self' data: https://shared.fastly.steamstatic.com https://shared.akamai.steamstatic.com https://cdn.akamai.steamstatic.com https://store.cloudflare.steamstatic.com; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
   );
   next();
 });
@@ -78,96 +102,409 @@ if (fs.existsSync(distPath)) {
 // STEAM GAME INFO CACHE
 // Fetches real game metadata from Steam Store API and caches to disk
 // ===================================================================
-const CACHE_FILE = path.join(__dirname, 'game_info_cache.json');
+const LEGACY_CACHE_FILE = path.join(__dirname, 'game_info_cache.json');
+const CACHE_DIRECTORY = process.env.HOLLOWRUN_USER_DATA
+  ? path.join(path.resolve(process.env.HOLLOWRUN_USER_DATA), 'cache')
+  : __dirname;
+const CACHE_FILE = path.join(CACHE_DIRECTORY, 'game-info.json');
+const OWNERSHIP_CACHE_FILE = path.join(CACHE_DIRECTORY, 'owned-library.json');
 const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const GAME_INFO_CACHE_VERSION = 2;
+const MAX_METADATA_REQUESTS = 6;
 let gameInfoCache = {};
+let ownershipCache = {};
+let ownershipVerification = null;
+let steamAppInfoCache = { signature: '', names: new Map(), scannedAppIds: new Set() };
+let activeMetadataRequests = 0;
+let cacheSaveTimer = null;
+const metadataWaiters = [];
+const gameInfoRequests = new Map();
+
+function getDefaultHeaderImage(appId) {
+  return `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`;
+}
+
+const PROFILE_WALLPAPER_MAX_BYTES = 12 * 1024 * 1024;
+const PROFILE_WALLPAPER_ANIMATION_MAX_BYTES = 32 * 1024 * 1024;
+const PROFILE_WALLPAPER_CACHE_MAX_BYTES = 36 * 1024 * 1024;
+const PROFILE_WALLPAPER_CACHE_LIMIT = 3;
+const PROFILE_WALLPAPER_TIMEOUT_MS = 8000;
+const PROFILE_WALLPAPER_CONTENT_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const PROFILE_WALLPAPER_VIDEO_CONTENT_TYPES = new Set(['video/webm', 'video/mp4']);
+const profileWallpaperImageCache = new Map();
+const profileWallpaperRequests = new Map();
+let profileWallpaperCacheBytes = 0;
+let launchProfileBackgroundState = null;
+
+function getLaunchProfileBackground(steamPath, activeUser) {
+  const steamId = String(activeUser?.steamId || '');
+  if (!/^7656\d{13}$/.test(steamId)) return null;
+
+  if (launchProfileBackgroundState?.steamId !== steamId) {
+    const state = {
+      steamId,
+      background: getActiveSteamProfileBackground(steamPath, activeUser),
+      request: null
+    };
+    launchProfileBackgroundState = state;
+    state.request = fetchPublicSteamProfileBackground(steamId, {
+      userAgent: `HollowRun/${APP_VERSION}`
+    })
+      .then(result => {
+        if (launchProfileBackgroundState === state && result.resolved) {
+          state.background = result.background;
+        }
+      })
+      .catch(() => {});
+  }
+
+  return launchProfileBackgroundState.background;
+}
+
+function getCachedProfileWallpaper(cacheKey) {
+  const cached = profileWallpaperImageCache.get(cacheKey);
+  if (!cached) return null;
+  profileWallpaperImageCache.delete(cacheKey);
+  profileWallpaperImageCache.set(cacheKey, cached);
+  return cached;
+}
+
+function cacheProfileWallpaper(cacheKey, image) {
+  const previous = profileWallpaperImageCache.get(cacheKey);
+  if (previous) profileWallpaperCacheBytes -= previous.data.length;
+  profileWallpaperImageCache.delete(cacheKey);
+  profileWallpaperImageCache.set(cacheKey, image);
+  profileWallpaperCacheBytes += image.data.length;
+  while (
+    profileWallpaperImageCache.size > PROFILE_WALLPAPER_CACHE_LIMIT
+    || profileWallpaperCacheBytes > PROFILE_WALLPAPER_CACHE_MAX_BYTES
+  ) {
+    const oldestKey = profileWallpaperImageCache.keys().next().value;
+    const oldest = profileWallpaperImageCache.get(oldestKey);
+    if (oldest) profileWallpaperCacheBytes -= oldest.data.length;
+    profileWallpaperImageCache.delete(oldestKey);
+  }
+}
+
+async function readBoundedResponseBody(response, maximumBytes) {
+  if (!response.body) return null;
+
+  const chunks = [];
+  let totalBytes = 0;
+  for await (const chunk of response.body) {
+    const buffer = Buffer.from(chunk);
+    totalBytes += buffer.length;
+    if (totalBytes > maximumBytes) {
+      try {
+        await response.body.cancel();
+      } catch {}
+      return null;
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks, totalBytes);
+}
+
+async function downloadProfileWallpaper(background) {
+  if (!background || !isAllowedSteamProfileBackgroundUrl(background.remoteUrl)) return null;
+
+  const cacheKey = `image:${background.revision}:${background.assetPath}`;
+  const cached = getCachedProfileWallpaper(cacheKey);
+  if (cached) return cached;
+  if (profileWallpaperRequests.has(cacheKey)) return profileWallpaperRequests.get(cacheKey);
+
+  const request = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROFILE_WALLPAPER_TIMEOUT_MS);
+    try {
+      const response = await fetch(background.remoteUrl, {
+        redirect: 'error',
+        headers: {
+          Accept: 'image/avif,image/webp,image/png,image/jpeg,*/*;q=0.5',
+          'User-Agent': `HollowRun/${APP_VERSION}`
+        },
+        signal: controller.signal
+      });
+      if (!response.ok || !isAllowedSteamProfileBackgroundUrl(response.url)) return null;
+
+      const contentType = String(response.headers.get('content-type') || '')
+        .split(';', 1)[0]
+        .trim()
+        .toLowerCase();
+      if (!PROFILE_WALLPAPER_CONTENT_TYPES.has(contentType)) return null;
+
+      const advertisedLength = Number(response.headers.get('content-length'));
+      if (Number.isFinite(advertisedLength) && advertisedLength > PROFILE_WALLPAPER_MAX_BYTES) {
+        return null;
+      }
+
+      const data = await readBoundedResponseBody(response, PROFILE_WALLPAPER_MAX_BYTES);
+      if (!data?.length) return null;
+
+      const image = Object.freeze({ data, contentType });
+      cacheProfileWallpaper(cacheKey, image);
+      return image;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+
+  profileWallpaperRequests.set(cacheKey, request);
+  try {
+    return await request;
+  } finally {
+    profileWallpaperRequests.delete(cacheKey);
+  }
+}
+
+async function downloadProfileWallpaperAnimation(animation) {
+  if (!animation || !isAllowedSteamProfileBackgroundVideoUrl(animation.remoteUrl)) return null;
+
+  const cacheKey = `animation:${animation.revision}:${animation.assetPath}`;
+  const cached = getCachedProfileWallpaper(cacheKey);
+  if (cached) return cached;
+  if (profileWallpaperRequests.has(cacheKey)) return profileWallpaperRequests.get(cacheKey);
+
+  const request = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROFILE_WALLPAPER_TIMEOUT_MS);
+    try {
+      const response = await fetch(animation.remoteUrl, {
+        redirect: 'error',
+        headers: {
+          Accept: 'video/webm,video/mp4;q=0.9,*/*;q=0.1',
+          'User-Agent': `HollowRun/${APP_VERSION}`
+        },
+        signal: controller.signal
+      });
+      if (!response.ok || !isAllowedSteamProfileBackgroundVideoUrl(response.url)) return null;
+
+      const contentType = String(response.headers.get('content-type') || '')
+        .split(';', 1)[0]
+        .trim()
+        .toLowerCase();
+      if (
+        !PROFILE_WALLPAPER_VIDEO_CONTENT_TYPES.has(contentType)
+        || contentType !== animation.contentType
+      ) {
+        return null;
+      }
+
+      const advertisedLength = Number(response.headers.get('content-length'));
+      if (
+        Number.isFinite(advertisedLength)
+        && advertisedLength > PROFILE_WALLPAPER_ANIMATION_MAX_BYTES
+      ) {
+        return null;
+      }
+
+      const data = await readBoundedResponseBody(response, PROFILE_WALLPAPER_ANIMATION_MAX_BYTES);
+      if (!data?.length) return null;
+
+      const video = Object.freeze({ data, contentType });
+      cacheProfileWallpaper(cacheKey, video);
+      return video;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+
+  profileWallpaperRequests.set(cacheKey, request);
+  try {
+    return await request;
+  } finally {
+    profileWallpaperRequests.delete(cacheKey);
+  }
+}
+
+function sendBufferWithRange(req, res, asset) {
+  const totalLength = asset.data.length;
+  const requestedRange = String(req.get('range') || '').trim();
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Type', asset.contentType);
+
+  if (!requestedRange) {
+    res.setHeader('Content-Length', totalLength);
+    res.send(asset.data);
+    return;
+  }
+
+  const match = requestedRange.match(/^bytes=(\d*)-(\d*)$/i);
+  if (!match || (!match[1] && !match[2])) {
+    res.setHeader('Content-Range', `bytes */${totalLength}`);
+    res.status(416).end();
+    return;
+  }
+
+  let start;
+  let end;
+  if (!match[1]) {
+    const suffixLength = Number(match[2]);
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
+      res.setHeader('Content-Range', `bytes */${totalLength}`);
+      res.status(416).end();
+      return;
+    }
+    start = Math.max(0, totalLength - suffixLength);
+    end = totalLength - 1;
+  } else {
+    start = Number(match[1]);
+    end = match[2] ? Number(match[2]) : totalLength - 1;
+  }
+
+  if (
+    !Number.isSafeInteger(start)
+    || !Number.isSafeInteger(end)
+    || start < 0
+    || start >= totalLength
+    || end < start
+  ) {
+    res.setHeader('Content-Range', `bytes */${totalLength}`);
+    res.status(416).end();
+    return;
+  }
+
+  end = Math.min(end, totalLength - 1);
+  const chunk = asset.data.subarray(start, end + 1);
+  res.status(206);
+  res.setHeader('Content-Range', `bytes ${start}-${end}/${totalLength}`);
+  res.setHeader('Content-Length', chunk.length);
+  res.end(chunk);
+}
+
+function hasFreshGameInfo(info) {
+  const cachedAt = Number(info?._cachedAt);
+  return info?._cacheVersion === GAME_INFO_CACHE_VERSION
+    && Number.isFinite(cachedAt)
+    && (Date.now() - cachedAt) < CACHE_MAX_AGE_MS;
+}
 
 function loadCache() {
+  gameInfoCache = {};
+  for (const cacheFile of new Set([LEGACY_CACHE_FILE, CACHE_FILE])) {
+    try {
+      if (!fs.existsSync(cacheFile)) continue;
+      const parsed = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        gameInfoCache = { ...gameInfoCache, ...parsed };
+      }
+    } catch (e) {}
+  }
+
   try {
-    if (fs.existsSync(CACHE_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
-      gameInfoCache = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    if (fs.existsSync(OWNERSHIP_CACHE_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(OWNERSHIP_CACHE_FILE, 'utf8'));
+      ownershipCache = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
     }
-  } catch (e) { gameInfoCache = {}; }
+  } catch (e) {
+    ownershipCache = {};
+  }
 }
 
 function saveCache() {
   try {
+    fs.mkdirSync(CACHE_DIRECTORY, { recursive: true });
     fs.writeFileSync(CACHE_FILE, JSON.stringify(gameInfoCache, null, 2), 'utf8');
   } catch (e) {}
 }
 
+function saveOwnershipCache() {
+  try {
+    fs.mkdirSync(CACHE_DIRECTORY, { recursive: true });
+    fs.writeFileSync(OWNERSHIP_CACHE_FILE, JSON.stringify(ownershipCache, null, 2), 'utf8');
+  } catch (e) {}
+}
+
+function scheduleCacheSave() {
+  if (cacheSaveTimer) clearTimeout(cacheSaveTimer);
+  cacheSaveTimer = setTimeout(() => {
+    cacheSaveTimer = null;
+    saveCache();
+  }, 250);
+  cacheSaveTimer.unref?.();
+}
+
 loadCache();
 
-// Fetch game details from Steam Store API (public, no key needed)
-async function fetchSteamGameInfo(appId) {
-  const cached = gameInfoCache[appId];
-  if (cached && (Date.now() - cached._cachedAt) < CACHE_MAX_AGE_MS) {
-    return cached;
+function acquireMetadataSlot() {
+  if (activeMetadataRequests < MAX_METADATA_REQUESTS) {
+    activeMetadataRequests++;
+    return Promise.resolve();
   }
+  return new Promise(resolve => metadataWaiters.push(resolve));
+}
 
-  try {
-    const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&l=english`;
-    const data = await fetchJson(url);
-    if (!data) return cached || null;
-    const entry = data[String(appId)];
-
-    if (!entry || !entry.success || !entry.data) return cached || null;
-
-    const d = entry.data;
-    const info = {
-      appid: appId,
-      name: d.name || `AppID ${appId}`,
-      type: d.type || 'unknown',
-      shortDescription: d.short_description || '',
-      developers: d.developers || [],
-      publishers: d.publishers || [],
-      genres: (d.genres || []).map(g => g.description),
-      categories: (d.categories || []).map(c => c.description),
-      hasTradingCards: (d.categories || []).some(c => c.id === 29),
-      hasAchievements: (d.categories || []).some(c => c.id === 22),
-      metacritic: d.metacritic ? d.metacritic.score : null,
-      releaseDate: d.release_date ? d.release_date.date : null,
-      isFree: d.is_free || false,
-      price: d.price_overview ? (d.price_overview.final / 100).toFixed(2) : (d.is_free ? 'Free' : null),
-      headerImage: `https://cdn.akamai.steamstatic.com/steam/apps/${appId}/header.jpg`,
-      backgroundImage: d.background_raw || d.background || null,
-      capsuleImage: d.capsule_image || null,
-      website: d.website || null,
-      supportedLanguages: d.supported_languages ? d.supported_languages.replace(/<[^>]*>/g, '').substring(0, 200) : null,
-      platforms: d.platforms || {},
-      _cachedAt: Date.now()
-    };
-
-    gameInfoCache[appId] = info;
-    saveCache();
-    return info;
-  } catch (e) {
-    return cached || null;
+function releaseMetadataSlot() {
+  const next = metadataWaiters.shift();
+  if (next) {
+    next();
+  } else {
+    activeMetadataRequests--;
   }
 }
 
-// Batch fetch game info for multiple AppIDs (rate-limited to avoid hammering Steam)
+// Fetch lightweight game details from Steam, globally bounded and deduplicated.
+async function fetchSteamGameInfo(appId) {
+  const cached = gameInfoCache[appId];
+  if (hasFreshGameInfo(cached)) return cached;
+  if (gameInfoRequests.has(appId)) return gameInfoRequests.get(appId);
+
+  const request = (async () => {
+    await acquireMetadataSlot();
+    try {
+      const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&l=english&filters=basic`;
+      const data = await fetchJson(url, 8000);
+      if (!data) return gameInfoCache[appId] || cached || null;
+      const entry = data[String(appId)];
+
+      if (!entry || !entry.success || !entry.data) return gameInfoCache[appId] || cached || null;
+
+      const d = entry.data;
+      const previous = gameInfoCache[appId] || cached || {};
+      const info = {
+        ...previous,
+        appid: appId,
+        name: normalizeGameName(d.name, appId),
+        type: d.type || previous.type || 'unknown',
+        shortDescription: d.short_description || previous.shortDescription || '',
+        developers: d.developers || previous.developers || [],
+        publishers: d.publishers || previous.publishers || [],
+        isFree: d.is_free ?? previous.isFree ?? false,
+        headerImage: d.header_image || previous.headerImage || getDefaultHeaderImage(appId),
+        capsuleImage: d.capsule_image || previous.capsuleImage || null,
+        _cacheVersion: GAME_INFO_CACHE_VERSION,
+        _cachedAt: Date.now()
+      };
+
+      gameInfoCache[appId] = info;
+      scheduleCacheSave();
+      return info;
+    } catch (e) {
+      return gameInfoCache[appId] || cached || null;
+    } finally {
+      releaseMetadataSlot();
+    }
+  })();
+
+  gameInfoRequests.set(appId, request);
+  try {
+    return await request;
+  } finally {
+    if (gameInfoRequests.get(appId) === request) gameInfoRequests.delete(appId);
+  }
+}
+
+// Fetch batches concurrently while the global limiter controls total Steam traffic.
 async function batchFetchGameInfo(appIds) {
   const results = {};
-  const toFetch = [];
-
-  for (const id of appIds) {
-    const cached = gameInfoCache[id];
-    if (cached && (Date.now() - cached._cachedAt) < CACHE_MAX_AGE_MS) {
-      results[id] = cached;
-    } else {
-      toFetch.push(id);
-    }
-  }
-
-  // Fetch uncached games sequentially with a small delay to be polite
-  for (const id of toFetch) {
+  await Promise.all(appIds.map(async id => {
     const info = await fetchSteamGameInfo(id);
     if (info) results[id] = info;
-    // Small delay between API calls
-    await new Promise(r => setTimeout(r, 250));
-  }
+  }));
 
   return results;
 }
@@ -175,179 +512,293 @@ async function batchFetchGameInfo(appIds) {
 // ===================================================================
 // PLAYTIME PARSER - localconfig.vdf
 // ===================================================================
-function parsePlaytimeData(steamPath) {
+function parsePlaytimeData(steamPath, accountId) {
   const playtimeMap = new Map(); // appId -> { playtimeMinutes, lastPlayed }
-  if (!steamPath) return playtimeMap;
+  const normalizedAccountId = String(accountId || '');
+  if (!steamPath || !/^\d+$/.test(normalizedAccountId)) return playtimeMap;
 
-  const userdataDir = path.join(steamPath, 'userdata');
-  if (!fs.existsSync(userdataDir)) return playtimeMap;
+  const configPath = path.join(steamPath, 'userdata', normalizedAccountId, 'config', 'localconfig.vdf');
+  if (!fs.existsSync(configPath)) return playtimeMap;
 
   try {
-    const userFolders = fs.readdirSync(userdataDir);
-    for (const uFolder of userFolders) {
-      const configPath = path.join(userdataDir, uFolder, 'config', 'localconfig.vdf');
-      if (!fs.existsSync(configPath)) continue;
+    const content = fs.readFileSync(configPath, 'utf8');
+    const lines = content.split('\n');
 
-      try {
-        const content = fs.readFileSync(configPath, 'utf8');
-        const lines = content.split('\n');
+    let currentAppId = null;
+    let inAppsBlock = false;
+    let braceDepth = 0;
 
-        let currentAppId = null;
-        let inAppsBlock = false;
-        let braceDepth = 0;
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
 
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i].trim();
+      if (line === '"apps"') {
+        inAppsBlock = true;
+        continue;
+      }
 
-          // Detect entry into the "apps" block
-          if (line === '"apps"') {
-            inAppsBlock = true;
-            continue;
-          }
+      if (inAppsBlock && line === '{' && braceDepth === 0) {
+        braceDepth = 1;
+        continue;
+      }
 
-          if (inAppsBlock && line === '{' && braceDepth === 0) {
-            braceDepth = 1;
-            continue;
-          }
+      if (!inAppsBlock || braceDepth < 1) continue;
 
-          if (!inAppsBlock || braceDepth < 1) continue;
+      if (line === '{') {
+        braceDepth++;
+        continue;
+      }
+      if (line === '}') {
+        braceDepth--;
+        if (braceDepth === 1) currentAppId = null;
+        if (braceDepth === 0) inAppsBlock = false;
+        continue;
+      }
 
-          if (line === '{') {
-            braceDepth++;
-            continue;
-          }
-          if (line === '}') {
-            braceDepth--;
-            if (braceDepth === 1) {
-              currentAppId = null;
-            }
-            if (braceDepth === 0) {
-              inAppsBlock = false;
-            }
-            continue;
-          }
-
-          // App ID lines at depth 1 within apps block
-          if (braceDepth === 1) {
-            const idMatch = line.match(/^"(\d+)"$/);
-            if (idMatch) {
-              currentAppId = parseInt(idMatch[1], 10);
-              if (!playtimeMap.has(currentAppId)) {
-                playtimeMap.set(currentAppId, { playtimeMinutes: 0, lastPlayed: 0 });
-              }
-            }
-          }
-
-          // KV pairs inside an app block
-          if (braceDepth === 2 && currentAppId != null) {
-            const kvMatch = line.match(/^"([^"]+)"\s+"([^"]+)"$/);
-            if (kvMatch) {
-              const key = kvMatch[1];
-              const val = kvMatch[2];
-              const entry = playtimeMap.get(currentAppId);
-
-              if (key === 'Playtime' || key === 'playtime') {
-                entry.playtimeMinutes = parseInt(val, 10) || 0;
-              } else if (key === 'PlaytimeDisconnected') {
-                entry.playtimeMinutes += parseInt(val, 10) || 0;
-              } else if (key === 'LastPlayed' || key === 'lastplayed') {
-                entry.lastPlayed = parseInt(val, 10) || 0;
-              }
-            }
+      if (braceDepth === 1) {
+        const idMatch = line.match(/^"(\d+)"$/);
+        if (idMatch) {
+          currentAppId = parseInt(idMatch[1], 10);
+          if (!playtimeMap.has(currentAppId)) {
+            playtimeMap.set(currentAppId, { playtimeMinutes: 0, lastPlayed: 0 });
           }
         }
-      } catch (e) {}
+      }
+
+      if (braceDepth === 2 && currentAppId != null) {
+        const kvMatch = line.match(/^"([^"]+)"\s+"([^"]+)"$/);
+        if (!kvMatch) continue;
+
+        const key = kvMatch[1];
+        const value = kvMatch[2];
+        const entry = playtimeMap.get(currentAppId);
+        if (key === 'Playtime' || key === 'playtime') {
+          entry.playtimeMinutes = parseInt(value, 10) || 0;
+        } else if (key === 'PlaytimeDisconnected') {
+          entry.playtimeMinutes += parseInt(value, 10) || 0;
+        } else if (key === 'LastPlayed' || key === 'lastplayed') {
+          entry.lastPlayed = parseInt(value, 10) || 0;
+        }
+      }
     }
   } catch (e) {}
 
   return playtimeMap;
 }
 
-// ===================================================================
-// PRESETS CATALOG
-// ===================================================================
-const POPULAR_PRESETS = [
-  { appid: 730, name: "Counter-Strike 2", category: "Popular" },
-  { appid: 440, name: "Team Fortress 2", category: "Popular" },
-  { appid: 570, name: "Dota 2", category: "Popular" },
-  { appid: 252490, name: "Rust", category: "Popular" },
-  { appid: 578080, name: "PUBG: BATTLEGROUNDS", category: "Popular" },
-  { appid: 1172470, name: "Apex Legends", category: "Popular" },
-  { appid: 105600, name: "Terraria", category: "Popular" },
-  { appid: 431960, name: "Wallpaper Engine", category: "Tools" },
-  { appid: 271590, name: "Grand Theft Auto V", category: "Popular" },
-  { appid: 1091500, name: "Cyberpunk 2077", category: "RPG" },
-  { appid: 1245620, name: "ELDEN RING", category: "RPG" },
-  { appid: 1623730, name: "Palworld", category: "Survival" },
-  { appid: 1086940, name: "Baldur's Gate 3", category: "RPG" },
-  { appid: 550, name: "Left 4 Dead 2", category: "FPS" },
-  { appid: 218620, name: "PAYDAY 2", category: "Action" },
-  { appid: 4000, name: "Garry's Mod", category: "Sandbox" },
-  { appid: 252950, name: "Rocket League", category: "Sports" },
-  { appid: 292030, name: "The Witcher 3: Wild Hunt", category: "RPG" },
-  { appid: 359550, name: "Tom Clancy's Rainbow Six Siege", category: "FPS" },
-  { appid: 1085660, name: "Destiny 2", category: "FPS" },
-  { appid: 381210, name: "Dead by Daylight", category: "Horror" },
-  { appid: 230410, name: "Warframe", category: "Action" },
-  { appid: 227300, name: "Euro Truck Simulator 2", category: "Simulation" },
-  { appid: 1158310, name: "Phasmophobia", category: "Horror" },
-  { appid: 945360, name: "Among Us", category: "Casual" },
-  { appid: 304930, name: "Unturned", category: "Survival" },
-  { appid: 413150, name: "Stardew Valley", category: "Simulation" },
-  { appid: 582010, name: "Monster Hunter: World", category: "Action" },
-  { appid: 553850, name: "HELLDIVERS™ 2", category: "Action" },
-  { appid: 377160, name: "Fallout 4", category: "RPG" },
-  { appid: 489830, name: "The Elder Scrolls V: Skyrim Special Edition", category: "RPG" },
-  { appid: 892970, name: "Valheim", category: "Survival" },
-  { appid: 1145360, name: "Hades", category: "Action" },
-  { appid: 367520, name: "Hollow Knight", category: "Action" },
-  { appid: 548430, name: "Deep Rock Galactic", category: "FPS" },
-  { appid: 250900, name: "The Binding of Isaac: Rebirth", category: "Indie" },
-  { appid: 588650, name: "Dead Cells", category: "Action" },
-  { appid: 294100, name: "RimWorld", category: "Strategy" },
-  { appid: 427520, name: "Factorio", category: "Strategy" },
-  { appid: 526870, name: "Satisfactory", category: "Simulation" },
-  { appid: 264710, name: "Subnautica", category: "Survival" },
-  { appid: 1604030, name: "V Rising", category: "Action" },
-  { appid: 1942630, name: "Lethal Company", category: "Horror" },
-  { appid: 2881650, name: "Content Warning", category: "Horror" },
-  { appid: 1366530, name: "Manor Lords", category: "Strategy" },
-  { appid: 480, name: "Spacewar (Developer Test)", category: "Preset" },
-];
+function getCachedLibraryAppIds(steamPath, accountId) {
+  const appIds = new Set();
+  const normalizedAccountId = String(accountId || '');
+  if (!steamPath || !/^\d+$/.test(normalizedAccountId)) return appIds;
+
+  const cacheDir = path.join(steamPath, 'userdata', normalizedAccountId, 'config', 'librarycache');
+  if (!fs.existsSync(cacheDir)) return appIds;
+
+  try {
+    for (const entry of fs.readdirSync(cacheDir, { withFileTypes: true })) {
+      const match = entry.name.match(/^(\d+)(?:\.|_|$)/i);
+      if (!match) continue;
+      const appId = parseInt(match[1], 10);
+      if (appId > 10) appIds.add(appId);
+    }
+  } catch (e) {}
+
+  return appIds;
+}
+
+const EXCLUDED_LIBRARY_APP_IDS = new Set([480, 228980]);
+
+function isLibraryCandidate(appId) {
+  return Number.isSafeInteger(appId) && appId > 10 && !EXCLUDED_LIBRARY_APP_IDS.has(appId);
+}
+
+function getSteamLibraryArtworkAppIds(steamPath) {
+  const appIds = new Set();
+  if (!steamPath) return appIds;
+  const artworkDirectory = path.join(steamPath, 'appcache', 'librarycache');
+  if (!fs.existsSync(artworkDirectory)) return appIds;
+
+  try {
+    for (const entry of fs.readdirSync(artworkDirectory, { withFileTypes: true })) {
+      const match = entry.name.match(/^(\d+)(?:$|[_.])/);
+      if (!match) continue;
+      const appId = Number(match[1]);
+      if (isLibraryCandidate(appId)) appIds.add(appId);
+    }
+  } catch (e) {}
+  return appIds;
+}
+
+const STEAM_APPINFO_V28_MAGIC = 0x07564428;
+const STEAM_APPINFO_V29_MAGIC = 0x07564429;
+const STEAM_APPINFO_RECORD_HEADER_SIZE = 68;
+
+function readNullTerminatedString(buffer, state, limit, wide = false) {
+  const start = state.offset;
+  let end = start;
+
+  if (wide) {
+    while (end + 1 < limit && (buffer[end] !== 0 || buffer[end + 1] !== 0)) end += 2;
+    if (end + 1 >= limit) return null;
+    state.offset = end + 2;
+    return buffer.toString('utf16le', start, end);
+  }
+
+  end = buffer.indexOf(0, start);
+  if (end < 0 || end >= limit) return null;
+  state.offset = end + 1;
+  return buffer.toString('utf8', start, end);
+}
+
+function readSteamAppInfoKey(buffer, state, limit, keyTable) {
+  if (keyTable) {
+    if (state.offset + 4 > limit) return null;
+    const index = buffer.readInt32LE(state.offset);
+    state.offset += 4;
+    return index >= 0 && index < keyTable.length ? keyTable[index] : null;
+  }
+  return readNullTerminatedString(buffer, state, limit);
+}
+
+function findSteamAppNameInBinaryVdf(buffer, start, limit, keyTable, appId) {
+  const state = { offset: start };
+  const pathStack = [];
+
+  while (state.offset < limit) {
+    const valueType = buffer[state.offset++];
+    if (valueType === 0x08 || valueType === 0x0b) {
+      if (pathStack.length === 0) break;
+      pathStack.pop();
+      continue;
+    }
+
+    const key = readSteamAppInfoKey(buffer, state, limit, keyTable);
+    if (key === null) return null;
+    const normalizedKey = key.toLowerCase();
+
+    if (valueType === 0x00) {
+      pathStack.push(normalizedKey);
+      continue;
+    }
+
+    let value = null;
+    if (valueType === 0x01) {
+      value = readNullTerminatedString(buffer, state, limit);
+    } else if (valueType === 0x05) {
+      value = readNullTerminatedString(buffer, state, limit, true);
+    } else if ([0x02, 0x03, 0x04, 0x06].includes(valueType)) {
+      state.offset += 4;
+    } else if (valueType === 0x07 || valueType === 0x0a) {
+      state.offset += 8;
+    } else {
+      return null;
+    }
+
+    if (state.offset > limit) return null;
+    if ((valueType === 0x01 || valueType === 0x05) && value === null) return null;
+    if (value === null) continue;
+    if (
+      pathStack.length >= 2
+      && pathStack[0] === 'appinfo'
+      && pathStack[pathStack.length - 1] === 'common'
+      && normalizedKey === 'name'
+    ) {
+      const normalizedName = normalizeGameName(value, appId);
+      return normalizedName === `AppID ${appId}` ? null : normalizedName;
+    }
+  }
+
+  return null;
+}
+
+function readSteamAppInfoKeyTable(buffer, tableOffset) {
+  if (!Number.isSafeInteger(tableOffset) || tableOffset < 16 || tableOffset + 4 > buffer.length) return null;
+  const keyCount = buffer.readInt32LE(tableOffset);
+  if (keyCount < 0 || keyCount > 1000000) return null;
+
+  const keys = [];
+  const state = { offset: tableOffset + 4 };
+  for (let index = 0; index < keyCount; index++) {
+    const key = readNullTerminatedString(buffer, state, buffer.length);
+    if (key === null) return null;
+    keys.push(key);
+  }
+  return keys;
+}
+
+function getSteamAppInfoNames(steamPath, requestedAppIds) {
+  const requested = new Set([...requestedAppIds].filter(isLibraryCandidate));
+  if (!steamPath || requested.size === 0) return new Map();
+
+  const appInfoPath = path.join(steamPath, 'appcache', 'appinfo.vdf');
+  try {
+    const stats = fs.statSync(appInfoPath);
+    const signature = `${stats.size}:${Math.trunc(stats.mtimeMs)}`;
+    if (steamAppInfoCache.signature !== signature) {
+      steamAppInfoCache = { signature, names: new Map(), scannedAppIds: new Set() };
+    }
+
+    const missingAppIds = new Set(
+      [...requested].filter(appId => !steamAppInfoCache.scannedAppIds.has(appId))
+    );
+    if (missingAppIds.size === 0) return steamAppInfoCache.names;
+
+    const buffer = fs.readFileSync(appInfoPath);
+    if (buffer.length < 12) return steamAppInfoCache.names;
+
+    const magic = buffer.readUInt32LE(0);
+    const isV29 = magic === STEAM_APPINFO_V29_MAGIC;
+    if (!isV29 && magic !== STEAM_APPINFO_V28_MAGIC) return steamAppInfoCache.names;
+
+    const keyTableOffset = isV29 ? Number(buffer.readBigInt64LE(8)) : buffer.length;
+    const keyTable = isV29 ? readSteamAppInfoKeyTable(buffer, keyTableOffset) : null;
+    if (isV29 && !keyTable) return steamAppInfoCache.names;
+
+    const recordsLimit = isV29 ? keyTableOffset : buffer.length;
+    let offset = isV29 ? 16 : 8;
+    while (offset + 8 <= recordsLimit && missingAppIds.size > 0) {
+      const appId = buffer.readUInt32LE(offset);
+      if (appId === 0) break;
+
+      const entrySize = buffer.readUInt32LE(offset + 4);
+      const recordEnd = offset + 8 + entrySize;
+      if (entrySize < STEAM_APPINFO_RECORD_HEADER_SIZE - 8 || recordEnd > recordsLimit) break;
+
+      if (missingAppIds.has(appId)) {
+        const name = findSteamAppNameInBinaryVdf(
+          buffer,
+          offset + STEAM_APPINFO_RECORD_HEADER_SIZE,
+          recordEnd,
+          keyTable,
+          appId
+        );
+        if (name) steamAppInfoCache.names.set(appId, name);
+        steamAppInfoCache.scannedAppIds.add(appId);
+        missingAppIds.delete(appId);
+      }
+
+      offset = recordEnd;
+    }
+
+    for (const appId of missingAppIds) steamAppInfoCache.scannedAppIds.add(appId);
+  } catch (error) {
+    // Store metadata remains available if Steam's local cache is unavailable.
+  }
+
+  return steamAppInfoCache.names;
+}
 
 // In-memory sessions store
 const activeSessions = new Map();
 
-// File path for custom user games
-const CUSTOM_GAMES_FILE = path.join(__dirname, 'custom_games.json');
-
-function loadCustomGames() {
-  try {
-    if (fs.existsSync(CUSTOM_GAMES_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(CUSTOM_GAMES_FILE, 'utf8'));
-      if (!Array.isArray(parsed)) return [];
-      return parsed
-        .map(game => {
-          const appId = parseAppId(game?.appid);
-          return appId === null ? null : { appid: appId, name: normalizeGameName(game?.name, appId) };
-        })
-        .filter(Boolean)
-        .slice(0, 1000);
-    }
-  } catch (err) {}
-  return [];
-}
-
-function saveCustomGames(games) {
-  try {
-    fs.writeFileSync(CUSTOM_GAMES_FILE, JSON.stringify(games, null, 2), 'utf8');
-  } catch (err) {}
-}
-
 // ===================================================================
 // STEAM PATH & USER DETECTION
 // ===================================================================
+let cachedSteamPath = null;
+
 function getSteamPath() {
+  if (cachedSteamPath && fs.existsSync(cachedSteamPath)) return cachedSteamPath;
+  cachedSteamPath = null;
+
   try {
     const output = execFileSync(
       'reg.exe',
@@ -357,14 +808,43 @@ function getSteamPath() {
     const match = output.match(/SteamPath\s+REG_\w+\s+(.+)$/im);
     const registryPath = match?.[1]?.trim();
     if (registryPath && fs.existsSync(registryPath)) {
-      return path.normalize(registryPath);
+      cachedSteamPath = path.normalize(registryPath);
+      return cachedSteamPath;
     }
   } catch (e) {}
 
   const defaultPaths = ['C:\\Program Files (x86)\\Steam', 'C:\\Program Files\\Steam', 'D:\\Steam'];
   for (const p of defaultPaths) {
-    if (fs.existsSync(p)) return p;
+    if (fs.existsSync(p)) {
+      cachedSteamPath = p;
+      return cachedSteamPath;
+    }
   }
+  return null;
+}
+
+function getLocalSteamArtPath(steamPath, appId, kind) {
+  if (!steamPath) return null;
+  const artDirectory = path.join(steamPath, 'appcache', 'librarycache', String(appId));
+  if (!fs.existsSync(artDirectory)) return null;
+
+  try {
+    const files = fs.readdirSync(artDirectory);
+    const preferredFiles = kind === 'header'
+      ? ['header.jpg', 'library_header.jpg', 'library_hero.jpg', 'library_600x900.jpg']
+      : [];
+    if (kind === 'icon') {
+      const hashedIcon = files.find(file => /^[a-f0-9]{40}\.(?:jpg|png)$/i.test(file));
+      if (hashedIcon) preferredFiles.push(hashedIcon);
+      preferredFiles.push('icon.png', 'icon.jpg', 'logo.png');
+    }
+
+    for (const file of preferredFiles) {
+      if (!files.includes(file)) continue;
+      const candidate = path.join(artDirectory, file);
+      if (fs.statSync(candidate).isFile()) return candidate;
+    }
+  } catch (e) {}
   return null;
 }
 
@@ -376,6 +856,31 @@ function parseVdfKV(content) {
     result[match[1]] = match[2];
   }
   return result;
+}
+
+function steamId64ToAccountId(steamId) {
+  try {
+    const accountId = BigInt(steamId) - 76561197960265728n;
+    return accountId > 0n ? accountId.toString() : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function getRunningSteamAccountId() {
+  try {
+    const output = execFileSync(
+      'reg.exe',
+      ['query', 'HKCU\\Software\\Valve\\Steam\\ActiveProcess', '/v', 'ActiveUser'],
+      { encoding: 'utf8', windowsHide: true }
+    );
+    const match = output.match(/ActiveUser\s+REG_DWORD\s+0x([a-f0-9]+)/i);
+    if (!match) return null;
+    const accountId = parseInt(match[1], 16);
+    return Number.isSafeInteger(accountId) && accountId > 0 ? String(accountId) : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 function getActiveSteamUser(steamPath) {
@@ -401,10 +906,17 @@ function getActiveSteamUser(steamPath) {
       }
     }
 
-    const active = users.find(u => u.MostRecent === '1') || users[0];
+    const usersWithAccountIds = users
+      .map(user => ({ ...user, accountId: steamId64ToAccountId(user.steamId) }))
+      .filter(user => user.accountId);
+    const runningAccountId = getRunningSteamAccountId();
+    const active = usersWithAccountIds.find(user => user.accountId === runningAccountId)
+      || usersWithAccountIds.find(user => user.MostRecent === '1')
+      || usersWithAccountIds[0];
     if (active) {
       return {
         steamId: active.steamId,
+        accountId: active.accountId,
         personaName: active.PersonaName || active.AccountName || 'Steam User',
         accountName: active.AccountName || '',
         mostRecent: active.MostRecent === '1'
@@ -414,14 +926,146 @@ function getActiveSteamUser(steamPath) {
   return null;
 }
 
+function getActiveSteamAvatarPath(steamPath, activeUser) {
+  if (!steamPath || !/^7656\d{13}$/.test(String(activeUser?.steamId || ''))) return null;
+
+  const avatarDirectory = path.join(steamPath, 'config', 'avatarcache');
+  for (const extension of ['png', 'jpg', 'jpeg']) {
+    const avatarPath = path.join(avatarDirectory, `${activeUser.steamId}.${extension}`);
+    try {
+      if (fs.statSync(avatarPath).isFile()) return avatarPath;
+    } catch (error) {}
+  }
+  return null;
+}
+
+function getOwnershipFingerprint(steamPath, steamId, candidateIds) {
+  const hash = createHash('sha256');
+  hash.update(String(steamId));
+  for (const appId of candidateIds) hash.update(`:${appId}`);
+
+  try {
+    const packageInfoPath = path.join(steamPath, 'appcache', 'packageinfo.vdf');
+    const stats = fs.statSync(packageInfoPath);
+    hash.update(`:${stats.size}:${Math.trunc(stats.mtimeMs)}`);
+  } catch (e) {
+    hash.update(':no-package-cache');
+  }
+
+  return hash.digest('hex');
+}
+
+function requestOwnedAppIdsFromWorker(candidateIds, expectedSteamId) {
+  return new Promise(resolve => {
+    const workerExe = getWorkerExecutablePath();
+    if (!workerExe) return resolve(null);
+
+    let child;
+    try {
+      child = spawn(workerExe, ['--verify-library'], {
+        cwd: path.dirname(workerExe),
+        env: { ...process.env, SteamAppId: '480', SteamGameId: '480' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true
+      });
+    } catch (e) {
+      return resolve(null);
+    }
+
+    let settled = false;
+    let stdout = '';
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    };
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish(null);
+    }, 15000);
+
+    child.stdout.on('data', data => {
+      if (stdout.length < 2 * 1024 * 1024) stdout += data.toString();
+    });
+    child.stderr.on('data', () => {});
+    child.on('error', () => finish(null));
+    child.on('close', () => {
+      const lines = stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean).reverse();
+      for (const line of lines) {
+        try {
+          const result = JSON.parse(line);
+          if (!result?.success || result.steamId !== expectedSteamId || !Array.isArray(result.ownedAppIds)) continue;
+          const candidates = new Set(candidateIds);
+          const ownedAppIds = new Set(
+            result.ownedAppIds
+              .map(parseAppId)
+              .filter(appId => appId !== null && candidates.has(appId) && isLibraryCandidate(appId))
+          );
+          return finish(ownedAppIds);
+        } catch (e) {}
+      }
+      finish(null);
+    });
+    child.stdin.on('error', () => {});
+    child.stdin.end(JSON.stringify(candidateIds));
+  });
+}
+
+async function getVerifiedOwnedAppIds(steamPath, activeUser, candidateAppIds) {
+  const candidateIds = [...candidateAppIds].filter(isLibraryCandidate).sort((left, right) => left - right);
+  if (candidateIds.length === 0) return new Set();
+
+  const fingerprint = getOwnershipFingerprint(steamPath, activeUser.steamId, candidateIds);
+  const cached = ownershipCache[activeUser.steamId];
+  if (cached?.fingerprint === fingerprint && Array.isArray(cached.appIds)) {
+    const candidates = new Set(candidateIds);
+    return new Set(cached.appIds.map(parseAppId).filter(appId => appId !== null && candidates.has(appId)));
+  }
+
+  if (ownershipVerification?.fingerprint === fingerprint) {
+    return ownershipVerification.promise;
+  }
+
+  const verificationPromise = (async () => {
+    const verified = await requestOwnedAppIdsFromWorker(candidateIds, activeUser.steamId);
+    if (!verified) {
+      if (!Array.isArray(cached?.appIds)) return null;
+      const candidates = new Set(candidateIds);
+      return new Set(cached.appIds.map(parseAppId).filter(appId => appId !== null && candidates.has(appId)));
+    }
+
+    ownershipCache[activeUser.steamId] = {
+      fingerprint,
+      verifiedAt: Date.now(),
+      appIds: [...verified]
+    };
+    saveOwnershipCache();
+    return verified;
+  })();
+  ownershipVerification = { fingerprint, promise: verificationPromise };
+
+  try {
+    return await verificationPromise;
+  } finally {
+    if (ownershipVerification?.promise === verificationPromise) ownershipVerification = null;
+  }
+}
+
 // ===================================================================
-// LIBRARY SCANNER - Installed games + user history + playtime
+// LIBRARY SCANNER - Active-account ownership + install and playtime data
 // ===================================================================
-function scanFullLibrary(steamPath) {
-  const gamesMap = new Map();
+async function scanFullLibrary(steamPath) {
   if (!steamPath) return [];
 
-  // 1. Scan installed game manifests
+  const activeUser = getActiveSteamUser(steamPath);
+  if (!activeUser?.accountId || !activeUser?.steamId) return [];
+
+  const playtimeMap = parsePlaytimeData(steamPath, activeUser.accountId);
+  const accountCacheAppIds = getCachedLibraryAppIds(steamPath, activeUser.accountId);
+  const installedManifests = new Map();
+
+  // Installed manifests add candidates and supply exact local names and paths.
   const libraryPaths = [path.join(steamPath, 'steamapps')];
   const libFoldersFile = path.join(steamPath, 'steamapps', 'libraryfolders.vdf');
   if (fs.existsSync(libFoldersFile)) {
@@ -450,14 +1094,11 @@ function scanFullLibrary(steamPath) {
             const kv = parseVdfKV(content);
             if (kv.appid && kv.name) {
               const appId = parseInt(kv.appid, 10);
-              if (appId > 0 && kv.name !== 'Steamworks Common Redistributables') {
-                gamesMap.set(appId, {
-                  appid: appId,
+              if (isLibraryCandidate(appId) && kv.name !== 'Steamworks Common Redistributables') {
+                installedManifests.set(appId, {
                   name: kv.name,
                   installdir: kv.installdir || '',
-                  sizeBytes: parseInt(kv.SizeOnDisk || '0', 10),
-                  installed: true,
-                  source: 'installed'
+                  sizeBytes: parseInt(kv.SizeOnDisk || '0', 10)
                 });
               }
             }
@@ -467,38 +1108,50 @@ function scanFullLibrary(steamPath) {
     } catch (e) {}
   }
 
-  // 2. Parse playtime data from localconfig.vdf
-  const playtimeMap = parsePlaytimeData(steamPath);
-  for (const [appId, ptData] of playtimeMap) {
-    if (appId <= 10) continue; // Skip Steam internal tools
+  // Steam's artwork cache contains unplayed and uninstalled library entries.
+  // It can include stale or other-account data, so every candidate is verified
+  // against the currently signed-in account before it reaches the UI.
+  const candidateAppIds = new Set([
+    ...getSteamLibraryArtworkAppIds(steamPath),
+    ...accountCacheAppIds,
+    ...playtimeMap.keys(),
+    ...installedManifests.keys()
+  ]);
+  if (candidateAppIds.size === 0) return [];
 
-    if (gamesMap.has(appId)) {
-      const existing = gamesMap.get(appId);
-      existing.playtimeMinutes = ptData.playtimeMinutes;
-      existing.lastPlayed = ptData.lastPlayed;
-      existing.lastPlayedDate = ptData.lastPlayed > 0
-        ? new Date(ptData.lastPlayed * 1000).toISOString()
-        : null;
-    } else if (ptData.playtimeMinutes > 0 || ptData.lastPlayed > 0) {
-      // Game in play history but not currently installed
-      const presetMatch = POPULAR_PRESETS.find(p => p.appid === appId);
-      gamesMap.set(appId, {
-        appid: appId,
-        name: presetMatch ? presetMatch.name : `Steam App ${appId}`,
-        installed: false,
-        source: 'history',
-        playtimeMinutes: ptData.playtimeMinutes,
-        lastPlayed: ptData.lastPlayed,
-        lastPlayedDate: ptData.lastPlayed > 0
-          ? new Date(ptData.lastPlayed * 1000).toISOString()
-          : null
-      });
-    }
-  }
+  const verifiedAppIds = await getVerifiedOwnedAppIds(steamPath, activeUser, candidateAppIds);
+  // If the worker is unavailable, fail closed to the account-specific cache.
+  // Play history and the global artwork cache are never ownership evidence.
+  const ownedAppIds = verifiedAppIds ?? accountCacheAppIds;
+  const localAppInfoNames = getSteamAppInfoNames(steamPath, ownedAppIds);
+  const gamesMap = new Map();
 
-  // 3. Add Steam CDN header image to all
-  for (const [appId, game] of gamesMap) {
-    game.headerImage = `https://cdn.akamai.steamstatic.com/steam/apps/${appId}/header.jpg`;
+  for (const appId of ownedAppIds) {
+    if (!isLibraryCandidate(appId)) continue;
+    const manifest = installedManifests.get(appId);
+    const playtime = playtimeMap.get(appId) || { playtimeMinutes: 0, lastPlayed: 0 };
+    const cachedInfo = gameInfoCache[appId];
+    const localAppInfoName = localAppInfoNames.get(appId);
+    const hasHistory = playtime.playtimeMinutes > 0 || playtime.lastPlayed > 0;
+
+    gamesMap.set(appId, {
+      appid: appId,
+      name: manifest?.name || localAppInfoName || cachedInfo?.name || `Steam App ${appId}`,
+      ...(manifest ? {
+        installdir: manifest.installdir,
+        sizeBytes: manifest.sizeBytes
+      } : {}),
+      installed: Boolean(manifest),
+      source: manifest ? 'installed' : (hasHistory ? 'history' : 'library'),
+      playtimeMinutes: playtime.playtimeMinutes,
+      lastPlayed: playtime.lastPlayed,
+      lastPlayedDate: playtime.lastPlayed > 0
+        ? new Date(playtime.lastPlayed * 1000).toISOString()
+        : null,
+      headerImage: cachedInfo?.headerImage || getDefaultHeaderImage(appId),
+      capsuleImage: cachedInfo?.capsuleImage || null,
+      metadataReady: Boolean(manifest?.name || localAppInfoName || hasFreshGameInfo(cachedInfo))
+    });
   }
 
   return Array.from(gamesMap.values());
@@ -531,7 +1184,7 @@ function startIdleSession(appId, gameName = '') {
 
     const workerExe = getWorkerExecutablePath();
     if (!workerExe) {
-      return resolve({ success: false, error: 'HollowRun worker not found. Build the HollowRun.Worker project first.' });
+      return resolve({ success: false, error: 'HollowRun worker files are missing. Rebuild HollowRun so the worker is published and packaged with the app.' });
     }
 
     const workerDir = path.join(__dirname, 'workers', `app_${appId}`);
@@ -651,7 +1304,7 @@ function getSessionInfo(session) {
     startTime: new Date(session.startTime).toISOString(),
     elapsedSeconds: Math.floor((Date.now() - session.startTime) / 1000),
     personaName: session.personaName, steamId: session.steamId,
-    headerImage: `https://cdn.akamai.steamstatic.com/steam/apps/${session.appId}/header.jpg`
+    headerImage: gameInfoCache[session.appId]?.headerImage || getDefaultHeaderImage(session.appId)
   };
 }
 
@@ -659,58 +1312,150 @@ function getSessionInfo(session) {
 // API ENDPOINTS
 // ===================================================================
 
+app.get('/api/health', (req, res) => {
+  res.json({ success: true, appVersion: APP_VERSION });
+});
+
 // Status
 app.get('/api/status', (req, res) => {
   const steamPath = getSteamPath();
   const activeUser = getActiveSteamUser(steamPath);
+  const avatarPath = getActiveSteamAvatarPath(steamPath, activeUser);
+  const profileBackground = getLaunchProfileBackground(steamPath, activeUser);
+  const profileWallpaperUrl = activeUser && profileBackground
+    ? `/api/steam-profile-background/${activeUser.steamId}?v=${profileBackground.revision}`
+    : null;
+  const profileWallpaperVideoUrl = activeUser && profileBackground?.animation
+    ? `/api/steam-profile-background/${activeUser.steamId}/animation?v=${profileBackground.animation.revision}`
+    : null;
   res.json({
     success: true,
+    appVersion: APP_VERSION,
     steamInstalled: !!steamPath,
+    maxIdleSessions: MAX_IDLE_SESSIONS,
     activeUser: activeUser
-      ? { personaName: activeUser.personaName, steamId: activeUser.steamId }
-      : { personaName: 'Steam Client', steamId: 'N/A' },
+      ? {
+          personaName: activeUser.personaName,
+          steamId: activeUser.steamId,
+          avatarUrl: avatarPath ? `/api/steam-avatar/${activeUser.steamId}` : null,
+          profileWallpaperUrl,
+          profileWallpaperVideoUrl,
+          profileWallpaperVideoType: profileBackground?.animation?.contentType || null
+        }
+      : {
+          personaName: 'Steam Client',
+          steamId: 'N/A',
+          avatarUrl: null,
+          profileWallpaperUrl: null,
+          profileWallpaperVideoUrl: null,
+          profileWallpaperVideoType: null
+        },
     activeSessionsCount: activeSessions.size
   });
 });
 
-// Full Library with playtime data
-app.get('/api/games', (req, res) => {
+// The avatar cache is account-specific. Only expose the currently active user.
+app.get('/api/steam-avatar/:steamid', (req, res) => {
   const steamPath = getSteamPath();
-  const libraryGames = scanFullLibrary(steamPath);
-  const customGames = loadCustomGames();
+  const activeUser = getActiveSteamUser(steamPath);
+  if (!activeUser || req.params.steamid !== activeUser.steamId) return res.status(404).end();
 
-  const knownAppIds = new Set(libraryGames.map(g => g.appid));
+  const avatarPath = getActiveSteamAvatarPath(steamPath, activeUser);
+  if (!avatarPath) return res.status(404).end();
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.sendFile(avatarPath);
+});
 
-  const presetList = POPULAR_PRESETS.filter(p => !knownAppIds.has(p.appid)).map(p => ({
-    appid: p.appid, name: p.name, installed: false,
-    headerImage: `https://cdn.akamai.steamstatic.com/steam/apps/${p.appid}/header.jpg`,
-    category: p.category, source: 'preset'
-  }));
+// Proxy only the active account's equipped profile background. It is resolved
+// once per desktop launch from the public profile, with Steam's local cache as
+// an offline fallback, then served through a revisioned same-origin URL.
+app.get('/api/steam-profile-background/:steamid', async (req, res) => {
+  const steamPath = getSteamPath();
+  const activeUser = getActiveSteamUser(steamPath);
+  if (!activeUser || req.params.steamid !== activeUser.steamId) return res.status(404).end();
 
-  const customList = customGames.filter(c => !knownAppIds.has(c.appid)).map(c => ({
-    appid: c.appid, name: c.name || `AppID ${c.appid}`, installed: false,
-    headerImage: `https://cdn.akamai.steamstatic.com/steam/apps/${c.appid}/header.jpg`,
-    category: 'Custom', source: 'custom'
-  }));
+  const background = getLaunchProfileBackground(steamPath, activeUser);
+  if (!background) return res.status(404).end();
 
-  // Library stats
-  const totalPlaytime = libraryGames.reduce((sum, g) => sum + (g.playtimeMinutes || 0), 0);
-  const installedCount = libraryGames.filter(g => g.installed).length;
-  const historyCount = libraryGames.filter(g => g.source === 'history').length;
+  const canonicalUrl = `/api/steam-profile-background/${activeUser.steamId}?v=${background.revision}`;
+  if (req.query.v !== background.revision) return res.redirect(307, canonicalUrl);
 
-  res.json({
-    success: true,
-    installed: libraryGames,
-    presets: presetList,
-    custom: customList,
-    libraryStats: {
-      totalGames: libraryGames.length,
-      installedGames: installedCount,
-      historyGames: historyCount,
-      totalPlaytimeMinutes: totalPlaytime,
-      totalPlaytimeHours: +(totalPlaytime / 60).toFixed(1)
-    }
-  });
+  const etag = `"${background.revision}"`;
+  res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
+  res.setHeader('ETag', etag);
+  if (req.get('if-none-match') === etag) return res.status(304).end();
+
+  const image = await downloadProfileWallpaper(background);
+  if (!image) return res.status(502).end();
+
+  res.setHeader('Content-Type', image.contentType);
+  res.setHeader('Content-Length', image.data.length);
+  res.setHeader('Content-Disposition', 'inline');
+  res.send(image.data);
+});
+
+app.get('/api/steam-profile-background/:steamid/animation', async (req, res) => {
+  const steamPath = getSteamPath();
+  const activeUser = getActiveSteamUser(steamPath);
+  if (!activeUser || req.params.steamid !== activeUser.steamId) return res.status(404).end();
+
+  const background = getLaunchProfileBackground(steamPath, activeUser);
+  const animation = background?.animation;
+  if (!animation) return res.status(404).end();
+
+  const canonicalUrl = `/api/steam-profile-background/${activeUser.steamId}/animation?v=${animation.revision}`;
+  if (req.query.v !== animation.revision) return res.redirect(307, canonicalUrl);
+
+  const etag = `"animation-${animation.revision}"`;
+  res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
+  res.setHeader('ETag', etag);
+  if (!req.get('range') && req.get('if-none-match') === etag) return res.status(304).end();
+
+  const video = await downloadProfileWallpaperAnimation(animation);
+  if (!video) return res.status(502).end();
+
+  res.setHeader('Content-Disposition', 'inline');
+  sendBufferWithRange(req, res, video);
+});
+
+// Serve only known Steam artwork filenames from the numeric AppID directory.
+app.get('/api/steam-art/:appid/:kind', (req, res) => {
+  const appId = parseAppId(req.params.appid);
+  const kind = req.params.kind;
+  if (appId === null || (kind !== 'header' && kind !== 'icon')) {
+    return res.status(400).end();
+  }
+
+  const artPath = getLocalSteamArtPath(getSteamPath(), appId, kind);
+  if (!artPath) return res.status(404).end();
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  res.sendFile(artPath);
+});
+
+// Full active-account library with playtime data
+app.get('/api/games', async (req, res) => {
+  try {
+    const steamPath = getSteamPath();
+    const libraryGames = await scanFullLibrary(steamPath);
+
+    const totalPlaytime = libraryGames.reduce((sum, game) => sum + (game.playtimeMinutes || 0), 0);
+    const installedCount = libraryGames.filter(game => game.installed).length;
+    const historyCount = libraryGames.filter(game => game.source === 'history').length;
+
+    res.json({
+      success: true,
+      installed: libraryGames,
+      libraryStats: {
+        totalGames: libraryGames.length,
+        installedGames: installedCount,
+        historyGames: historyCount,
+        totalPlaytimeMinutes: totalPlaytime,
+        totalPlaytimeHours: +(totalPlaytime / 60).toFixed(1)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Could not verify the active Steam library.' });
+  }
 });
 
 // Fetch detailed Steam info for a specific game
@@ -730,13 +1475,23 @@ app.post('/api/enrich-games', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Provide an array of appids' });
   }
 
-  // Limit to 20 per batch request
-  const limited = [...new Set(appids.slice(0, 20).map(parseAppId).filter(id => id !== null))];
+  // A page plus its immediate neighbours fits comfortably in one bounded batch.
+  const limited = [...new Set(appids.slice(0, 64).map(parseAppId).filter(id => id !== null))];
   if (limited.length === 0) {
     return res.status(400).json({ success: false, error: 'No valid AppIDs provided' });
   }
   const enriched = await batchFetchGameInfo(limited);
-  res.json({ success: true, games: enriched });
+  const compactGames = {};
+  for (const [appId, info] of Object.entries(enriched)) {
+    compactGames[appId] = {
+      appid: info.appid,
+      name: info.name,
+      headerImage: info.headerImage || getDefaultHeaderImage(appId),
+      capsuleImage: info.capsuleImage || null,
+      metadataReady: hasFreshGameInfo(info)
+    };
+  }
+  res.json({ success: true, games: compactGames });
 });
 
 // Steam Store live search
@@ -757,7 +1512,7 @@ app.get('/api/search-steam-store', async (req, res) => {
         return {
           appid: appId,
           name: normalizeGameName(item?.name, appId),
-          headerImage: `https://cdn.akamai.steamstatic.com/steam/apps/${appId}/header.jpg`,
+          headerImage: getDefaultHeaderImage(appId),
           price: Number.isFinite(finalPrice) ? (finalPrice / 100).toFixed(2) : 'Free',
           category: 'Steam Store Search'
         };
@@ -813,20 +1568,6 @@ app.post('/api/idle/stop-all', (req, res) => {
   res.json({ success: true, stoppedCount: stopped.length, stoppedAppIds: stopped });
 });
 
-// Add Custom Game
-app.post('/api/custom-game', (req, res) => {
-  const { appid, name } = req.body ?? {};
-  const numAppId = parseAppId(appid);
-  if (numAppId === null) return res.status(400).json({ success: false, error: 'Valid AppID required' });
-  const gameName = normalizeGameName(name, numAppId);
-  const custom = loadCustomGames();
-  if (!custom.some(c => c.appid === numAppId)) {
-    custom.push({ appid: numAppId, name: gameName });
-    saveCustomGames(custom);
-  }
-  res.json({ success: true, appid: numAppId, name: gameName });
-});
-
 // SPA fallback
 app.get('*', (req, res) => {
   if (fs.existsSync(path.join(distPath, 'index.html'))) {
@@ -841,6 +1582,11 @@ const server = app.listen(PORT, HOST, () => {
 });
 
 function shutdown() {
+  if (cacheSaveTimer) {
+    clearTimeout(cacheSaveTimer);
+    cacheSaveTimer = null;
+    saveCache();
+  }
   for (const appId of Array.from(activeSessions.keys())) stopIdleSession(appId);
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 2000).unref();

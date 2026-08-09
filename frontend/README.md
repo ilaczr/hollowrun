@@ -1,10 +1,5 @@
-# IdleTool frontend
+# HollowRun desktop renderer
 
-The React/Vite dashboard for IdleTool.
+This React interface is compiled into HollowRun and displayed only inside its Electron window. It is not a standalone browser application and does not provide development-server or preview entry points.
 
-```powershell
-npm ci
-npm run dev
-```
-
-The development server binds to `127.0.0.1` and proxies `/api` to the IdleTool backend on port 3824.
+Vite remains an internal production compiler used by the root portable build command.

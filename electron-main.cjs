@@ -1,5 +1,6 @@
 const { app, BrowserWindow, screen, utilityProcess } = require('electron');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const http = require('http');
 const crypto = require('crypto');
 const {
@@ -11,76 +12,171 @@ const {
 } = require('./window-state.cjs');
 
 const SERVER_URL = 'http://127.0.0.1:3824';
+const LOADING_PAGE_PATH = path.join(__dirname, 'loading.html');
+const LOADING_PAGE_URL = pathToFileURL(LOADING_PAGE_PATH).href;
+const SERVER_STARTUP_TIMEOUT_MS = 15000;
+const SERVER_RETRY_INTERVAL_MS = 150;
+const DEFAULT_WINDOW_WIDTH = 1600;
+const DEFAULT_WINDOW_HEIGHT = 900;
+const DEFAULT_WINDOW_WORK_AREA_INSET = 48;
 const instanceToken = crypto.randomBytes(32).toString('hex');
 let mainWindow;
 let serverProcess;
 let windowStateSaveTimer;
+let backendReady = false;
+let startupState = {
+  progress: 8,
+  action: 'Preparing application window...'
+};
 
 app.setName('HollowRun');
 
+function getDefaultWindowBounds() {
+  const { workArea } = screen.getPrimaryDisplay();
+  const width = Math.max(
+    MIN_WIDTH,
+    Math.min(DEFAULT_WINDOW_WIDTH, workArea.width - DEFAULT_WINDOW_WORK_AREA_INSET)
+  );
+  const height = Math.max(
+    MIN_HEIGHT,
+    Math.min(DEFAULT_WINDOW_HEIGHT, workArea.height - DEFAULT_WINDOW_WORK_AREA_INSET)
+  );
+
+  return {
+    x: workArea.x + Math.max(0, Math.round((workArea.width - width) / 2)),
+    y: workArea.y + Math.max(0, Math.round((workArea.height - height) / 2)),
+    width,
+    height
+  };
+}
+
+function publishStartupProgress() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const currentUrl = mainWindow.webContents.getURL();
+  if (currentUrl !== LOADING_PAGE_URL && !currentUrl.startsWith(`${LOADING_PAGE_URL}?`)) return;
+  mainWindow.webContents.send('startup-progress', startupState);
+}
+
+function updateStartupProgress(progress, action) {
+  startupState = {
+    progress: Math.max(0, Math.min(100, Math.round(progress))),
+    action
+  };
+  publishStartupProgress();
+}
+
 const checkServer = () => {
   return new Promise((resolve) => {
-    const req = http.get(`${SERVER_URL}/api/status`, (res) => {
+    const req = http.get(`${SERVER_URL}/api/health`, {
+      headers: { 'X-HollowRun-Instance': instanceToken }
+    }, (res) => {
       res.resume();
-      if (res.statusCode === 200 && res.headers['x-hollowrun-instance'] === instanceToken) {
-        resolve(true);
-      } else {
-        resolve(false);
-      }
+      resolve(res.statusCode === 200 && res.headers['x-hollowrun-instance'] === instanceToken);
     });
     req.on('error', () => resolve(false));
-    req.setTimeout(1000, () => {
+    req.setTimeout(750, () => {
       req.destroy();
       resolve(false);
     });
-    req.end();
   });
 };
 
-const waitForServer = async (retries = 30) => {
-  for (let i = 0; i < retries; i++) {
-    const isReady = await checkServer();
-    if (isReady) return true;
-    await new Promise(r => setTimeout(r, 500));
-  }
+const waitForServer = async () => {
+  const startedAt = Date.now();
+  const deadline = Date.now() + SERVER_STARTUP_TIMEOUT_MS;
+  updateStartupProgress(34, 'Waiting for local services...');
+
+  do {
+    if (await checkServer()) {
+      updateStartupProgress(78, 'Local services are ready.');
+      return true;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const elapsedRatio = (Date.now() - startedAt) / SERVER_STARTUP_TIMEOUT_MS;
+    updateStartupProgress(34 + Math.min(40, Math.floor(elapsedRatio * 40)), 'Waiting for local services...');
+    await new Promise(resolve => setTimeout(resolve, Math.min(SERVER_RETRY_INTERVAL_MS, remaining)));
+  } while (Date.now() < deadline);
+
   return false;
 };
+
+function isAllowedNavigation(url) {
+  return url === SERVER_URL
+    || url === `${SERVER_URL}/`
+    || url === LOADING_PAGE_URL
+    || url.startsWith(`${LOADING_PAGE_URL}?`);
+}
+
+function loadWindowContent() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  const load = backendReady
+    ? mainWindow.loadURL(SERVER_URL)
+    : mainWindow.loadFile(LOADING_PAGE_PATH);
+
+  load.catch((error) => {
+    if (error?.code !== 'ERR_ABORTED' && error?.errno !== -3) {
+      console.error(`Could not load the HollowRun window: ${error.message}`);
+    }
+  });
+}
 
 function createWindow() {
   const stateFile = path.join(app.getPath('userData'), 'window-state.json');
   const savedState = readWindowState(stateFile);
   const restoredState = savedState ? fitWindowStateToDisplay(savedState, screen) : null;
-  const shouldMaximize = restoredState ? restoredState.isMaximized : true;
+  const shouldMaximize = restoredState?.isMaximized === true;
+  const initialBounds = restoredState
+    ? {
+        x: restoredState.x,
+        y: restoredState.y,
+        width: restoredState.width,
+        height: restoredState.height
+      }
+    : getDefaultWindowBounds();
 
   mainWindow = new BrowserWindow({
-    ...(restoredState
-      ? { x: restoredState.x, y: restoredState.y, width: restoredState.width, height: restoredState.height }
-      : { width: 1280, height: 800 }),
+    ...initialBounds,
     minWidth: MIN_WIDTH,
     minHeight: MIN_HEIGHT,
     show: false,
-    backgroundColor: '#0e1219',
+    backgroundColor: '#010203',
     title: 'HollowRun',
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#0e1219',
-      symbolColor: '#f1f5f9',
-      height: 32
+      color: '#030405',
+      symbolColor: '#f3f5f7',
+      height: 28
     },
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
-      webviewTag: false
+      webviewTag: false,
+      preload: path.join(__dirname, 'loading-preload.cjs')
     },
-    icon: path.join(__dirname, 'frontend/public/hollowrun.svg')
+    icon: path.join(__dirname, 'frontend/public/hollowrun.png')
   });
+
+  mainWindow.webContents.session.webRequest.onBeforeSendHeaders(
+    { urls: [`${SERVER_URL}/*`] },
+    (details, callback) => {
+      callback({
+        requestHeaders: {
+          ...details.requestHeaders,
+          'X-HollowRun-Instance': instanceToken
+        }
+      });
+    }
+  );
 
   mainWindow.setMenuBarVisibility(false);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (url !== SERVER_URL && url !== `${SERVER_URL}/`) event.preventDefault();
+    if (!isAllowedNavigation(url)) event.preventDefault();
   });
+  mainWindow.webContents.on('did-finish-load', publishStartupProgress);
 
   const saveWindowState = () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -104,7 +200,7 @@ function createWindow() {
   mainWindow.on('maximize', scheduleWindowStateSave);
   mainWindow.on('unmaximize', scheduleWindowStateSave);
   mainWindow.on('close', saveWindowState);
-  mainWindow.loadURL(SERVER_URL);
+  loadWindowContent();
 
   mainWindow.on('closed', function () {
     clearTimeout(windowStateSaveTimer);
@@ -114,10 +210,18 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  const serverPath = path.join(__dirname, 'backend', 'server.js');
+  updateStartupProgress(8, 'Preparing application window...');
+  createWindow();
 
+  updateStartupProgress(20, 'Starting local services...');
+  const serverPath = path.join(__dirname, 'backend', 'server.js');
   serverProcess = utilityProcess.fork(serverPath, [], {
-    env: { ...process.env, ELECTRON_APP: 'true', HOLLOWRUN_INSTANCE_TOKEN: instanceToken },
+    env: {
+      ...process.env,
+      ELECTRON_APP: 'true',
+      HOLLOWRUN_INSTANCE_TOKEN: instanceToken,
+      HOLLOWRUN_USER_DATA: app.getPath('userData')
+    },
     stdio: 'pipe'
   });
   serverProcess.stdout?.on('data', (data) => console.log(data.toString().trimEnd()));
@@ -126,10 +230,10 @@ app.whenReady().then(async () => {
     if (code !== 0) console.error(`Backend process exited with code ${code}.`);
   });
 
-  const isReady = await waitForServer();
-
-  if (isReady) {
-    createWindow();
+  if (await waitForServer()) {
+    updateStartupProgress(88, 'Loading your Steam library...');
+    backendReady = true;
+    loadWindowContent();
   } else {
     console.error('Backend server failed to start on port 3824 in time.');
     app.quit();
