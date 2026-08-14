@@ -1,8 +1,9 @@
-const { app, BrowserWindow, screen, utilityProcess } = require('electron');
+const { app, BrowserWindow, dialog, screen, session, utilityProcess } = require('electron');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const http = require('http');
 const crypto = require('crypto');
+const { isSteamClientReady } = require('./startup-gate.cjs');
 const {
   MIN_HEIGHT,
   MIN_WIDTH,
@@ -19,6 +20,7 @@ const SERVER_RETRY_INTERVAL_MS = 150;
 const DEFAULT_WINDOW_WIDTH = 1600;
 const DEFAULT_WINDOW_HEIGHT = 900;
 const DEFAULT_WINDOW_WORK_AREA_INSET = 48;
+const LEGACY_STEAM_COMMUNITY_PARTITION = 'persist:hollowrun-steam-community';
 const instanceToken = crypto.randomBytes(32).toString('hex');
 let mainWindow;
 let serverProcess;
@@ -30,6 +32,14 @@ let startupState = {
 };
 
 app.setName('HollowRun');
+
+async function clearLegacySteamCommunitySession() {
+  const legacySession = session.fromPartition(LEGACY_STEAM_COMMUNITY_PARTITION);
+  await Promise.all([
+    legacySession.clearStorageData(),
+    legacySession.clearCache()
+  ]);
+}
 
 function getDefaultWindowBounds() {
   const { workArea } = screen.getPrimaryDisplay();
@@ -100,6 +110,57 @@ const waitForServer = async () => {
 
   return false;
 };
+
+const getBackendStatus = () => {
+  return new Promise((resolve) => {
+    const req = http.get(`${SERVER_URL}/api/status`, {
+      headers: { 'X-HollowRun-Instance': instanceToken }
+    }, (res) => {
+      if (res.statusCode !== 200 || res.headers['x-hollowrun-instance'] !== instanceToken) {
+        res.resume();
+        resolve(null);
+        return;
+      }
+
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => {
+        body += chunk;
+        if (body.length > 65536) req.destroy();
+      });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(body));
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(3000, () => {
+      req.destroy();
+      resolve(null);
+    });
+  });
+};
+
+async function showSteamClientRequired(status) {
+  const steamWasFound = status?.steamInstalled === true;
+  await dialog.showMessageBox({
+    type: 'warning',
+    title: 'Steam Client Required',
+    message: steamWasFound
+      ? 'Steam Client must be running and signed in before HollowRun can start.'
+      : 'Steam could not be found on this computer.',
+    detail: steamWasFound
+      ? 'Open Steam, sign in to your account, then start HollowRun again.'
+      : 'Install Steam or repair its installation, then start HollowRun again.',
+    buttons: ['Close HollowRun'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  });
+}
 
 function isAllowedNavigation(url) {
   return url === SERVER_URL
@@ -210,9 +271,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  updateStartupProgress(8, 'Preparing application window...');
-  createWindow();
-
+  await clearLegacySteamCommunitySession().catch(() => {});
   updateStartupProgress(20, 'Starting local services...');
   const serverPath = path.join(__dirname, 'backend', 'server.js');
   serverProcess = utilityProcess.fork(serverPath, [], {
@@ -231,9 +290,17 @@ app.whenReady().then(async () => {
   });
 
   if (await waitForServer()) {
+    updateStartupProgress(82, 'Checking the Steam Client connection...');
+    const status = await getBackendStatus();
+    if (!isSteamClientReady(status)) {
+      await showSteamClientRequired(status);
+      app.quit();
+      return;
+    }
+
     updateStartupProgress(88, 'Loading your Steam library...');
     backendReady = true;
-    loadWindowContent();
+    createWindow();
   } else {
     console.error('Backend server failed to start on port 3824 in time.');
     app.quit();

@@ -1,5 +1,5 @@
 export const MAX_APP_ID = 0xFFFFFFFF;
-export const MAX_IDLE_SESSIONS = 8;
+export const MAX_IDLE_SESSIONS = 32;
 
 const MAX_GAME_NAME_LENGTH = 120;
 

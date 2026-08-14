@@ -5,12 +5,12 @@
   text-rendering: optimizeLegibility;
 
   --bg-app: #010203;
-  --bg-sidebar: rgba(3, 5, 7, 0.78);
-  --bg-panel: rgba(5, 7, 9, 0.82);
-  --bg-panel-muted: rgba(7, 9, 12, 0.84);
-  --bg-card: rgba(4, 6, 8, 0.86);
-  --bg-card-hover: rgba(7, 10, 13, 0.9);
-  --bg-input: rgba(3, 5, 7, 0.74);
+  --bg-sidebar: rgba(3, 5, 7, 0.52);
+  --bg-panel: rgba(5, 7, 9, 0.7);
+  --bg-panel-muted: rgba(7, 9, 12, 0.74);
+  --bg-card: rgba(4, 6, 8, 0.78);
+  --bg-card-hover: rgba(7, 10, 13, 0.84);
+  --bg-input: rgba(3, 5, 7, 0.58);
 
   --border-color: #292e34;
   --border-strong: #3b424a;
@@ -36,7 +36,8 @@
   --brand-text-glow: 0 0 5px rgba(255, 255, 255, 0.32),
     0 0 13px rgba(255, 255, 255, 0.12);
 
-  --side-panel-width: clamp(220px, 13.5vw, 238px);
+  --left-panel-width: clamp(288px, 18vw, 320px);
+  --right-panel-width: clamp(288px, 18vw, 320px);
   --titlebar-height: 28px;
 }
 
@@ -122,9 +123,9 @@ select:focus-visible {
   height: 100vh;
   min-width: 0;
   grid-template-columns:
-    var(--side-panel-width)
+    var(--left-panel-width)
     minmax(0, 1fr)
-    var(--side-panel-width);
+    var(--right-panel-width);
   gap: 12px;
   padding: 0 7px 12px;
   overflow: hidden;
@@ -139,7 +140,7 @@ select:focus-visible {
   background-position: center 18%;
   background-size: cover;
   content: "";
-  filter: saturate(0.7) brightness(0.62) contrast(1.06);
+  filter: saturate(0.88) brightness(0.82) contrast(1.02);
   opacity: 1;
   pointer-events: none;
 }
@@ -154,7 +155,7 @@ select:focus-visible {
   width: 100%;
   height: calc(100% - var(--titlebar-height));
   border: 0;
-  filter: saturate(0.7) brightness(0.62) contrast(1.06);
+  filter: saturate(0.88) brightness(0.82) contrast(1.02);
   object-fit: cover;
   object-position: center 18%;
   pointer-events: none;
@@ -168,7 +169,7 @@ select:focus-visible {
   border: 1px solid var(--border-color);
   border-radius: 12px;
   box-shadow: inset 0 0 22px rgba(0, 0, 0, 0.24);
-  backdrop-filter: blur(5px);
+  backdrop-filter: blur(2px);
 }
 
 .app-layout.electron-window,
@@ -301,35 +302,99 @@ select:focus-visible {
 }
 
 .sidebar-profile {
-  margin: 18px 7px 0;
-  padding: 15px 0 2px;
-  border-top: 1px solid var(--border-color);
+  position: relative;
+  min-height: 76px;
+  margin: 18px 6px 0;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 15px 15px 7px 7px;
+  background: linear-gradient(135deg, rgba(17, 21, 26, 0.98), rgba(5, 8, 11, 0.98));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.025), 0 8px 20px rgba(0, 0, 0, 0.22);
+  isolation: isolate;
+}
+
+.sidebar-profile.has-mini-background {
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.profile-mini-background,
+.profile-card-shade {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.profile-mini-background {
+  z-index: 0;
+  object-fit: cover;
+  transform: scale(1.025);
+}
+
+.profile-card-shade {
+  z-index: 1;
+  background:
+    linear-gradient(90deg, rgba(3, 6, 9, 0.35) 0%, rgba(3, 6, 9, 0.68) 62%, rgba(3, 6, 9, 0.9) 100%),
+    linear-gradient(0deg, rgba(2, 4, 6, 0.32), rgba(2, 4, 6, 0.08));
+  box-shadow: inset 0 0 28px rgba(0, 0, 0, 0.25);
 }
 
 .profile-info {
+  position: relative;
+  z-index: 2;
   display: flex;
+  min-height: 74px;
   min-width: 0;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
+  padding: 11px 12px;
+}
+
+.profile-avatar-shell {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+}
+
+.profile-avatar-shell.has-avatar-frame {
+  width: 48px;
+  height: 48px;
+  flex-basis: 48px;
 }
 
 .profile-avatar {
+  position: absolute;
+  inset: 2px;
   display: grid;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
   overflow: hidden;
   place-items: center;
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: 5px;
   background: var(--bg-panel-muted);
   color: var(--accent);
+}
+
+.has-avatar-frame .profile-avatar {
+  inset: 7px;
+  border: 0;
+  border-radius: 3px;
 }
 
 .profile-avatar img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.profile-avatar-frame {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
 }
 
 .profile-copy {
@@ -346,13 +411,27 @@ select:focus-visible {
 .profile-name {
   color: var(--text-main);
   font-size: 0.82rem;
-  font-weight: 600;
+  font-weight: 650;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
 }
 
 .profile-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   margin-top: 1px;
-  color: var(--text-dim);
+  color: rgba(226, 232, 238, 0.7);
   font-size: 0.69rem;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
+}
+
+.profile-status-dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 5px;
+  border-radius: 50%;
+  background: #4ecb71;
+  box-shadow: 0 0 6px rgba(78, 203, 113, 0.75);
 }
 
 /* Main library */
@@ -363,7 +442,7 @@ select:focus-visible {
   padding: 24px 20px 20px;
   overflow-x: hidden;
   overflow-y: auto;
-  background: rgba(2, 4, 6, 0.58);
+  background: rgba(2, 4, 6, 0.32);
   scrollbar-gutter: stable;
 }
 
@@ -470,7 +549,7 @@ select:focus-visible {
   align-items: center;
   gap: 8px;
   padding: 14px 16px;
-  background: rgba(4, 6, 8, 0.88);
+  background: rgba(4, 6, 8, 0.72);
 }
 
 .stat-icon-wrapper {
@@ -630,6 +709,63 @@ select:focus-visible {
   color: var(--text-main);
   font-size: 1rem;
   font-weight: 650;
+}
+
+.card-scan-indicator {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.card-scan-visual {
+  position: relative;
+  display: grid;
+  width: 28px;
+  height: 22px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  place-items: center;
+  border: 1px solid rgba(7, 143, 242, 0.32);
+  border-radius: 4px;
+  background: rgba(7, 143, 242, 0.08);
+  color: var(--accent);
+}
+
+.card-scan-sweep {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  border-radius: 2px;
+  background: #71c8ff;
+  box-shadow: 0 0 7px 2px rgba(7, 143, 242, 0.7);
+  animation: card-scan-sweep 1.35s ease-in-out infinite;
+}
+
+.card-scan-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.card-scan-dots i {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: card-scan-pulse 1.1s ease-in-out infinite;
+}
+
+.card-scan-dots i:nth-child(2) {
+  animation-delay: 140ms;
+}
+
+.card-scan-dots i:nth-child(3) {
+  animation-delay: 280ms;
 }
 
 .badge {
@@ -800,6 +936,10 @@ select:focus-visible {
   padding-top: 12px;
 }
 
+.game-actions.single-action {
+  grid-template-columns: 1fr;
+}
+
 .manage-btn {
   display: inline-flex;
   min-width: 0;
@@ -822,6 +962,11 @@ select:focus-visible {
 .manage-btn:hover:not(:disabled) {
   border-color: var(--accent-hover);
   background: linear-gradient(180deg, #2aa8ff 0%, #0b8df5 100%);
+}
+
+.manage-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .manage-btn.queue-btn {
@@ -876,6 +1021,29 @@ select:focus-visible {
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-panel-muted);
+}
+
+.cards-empty-state {
+  align-content: center;
+  justify-items: center;
+  gap: 14px;
+}
+
+.empty-state-action {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: linear-gradient(180deg, #129cff 0%, #087fe8 100%);
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+.empty-state-action:hover {
+  border-color: var(--accent-hover);
+  background: linear-gradient(180deg, #2aa8ff 0%, #0b8df5 100%);
 }
 
 .page-navigation {
@@ -1095,19 +1263,18 @@ select:focus-visible {
 }
 
 .task-section-controls {
-  display: flex;
+  display: grid;
   width: 100%;
   min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
 }
 
 .queue-start-btn {
   display: inline-flex;
   height: 30px;
   min-width: 0;
-  flex: 1;
   align-items: center;
   justify-content: center;
   gap: 6px;
@@ -1293,6 +1460,33 @@ select:focus-visible {
 @keyframes search-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes card-scan-sweep {
+  0%,
+  100% {
+    left: 3px;
+    opacity: 0.45;
+  }
+
+  50% {
+    left: calc(100% - 5px);
+    opacity: 1;
+  }
+}
+
+@keyframes card-scan-pulse {
+  0%,
+  70%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+
+  35% {
+    opacity: 1;
+    transform: translateY(-2px);
   }
 }
 

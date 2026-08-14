@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_APP_ID, normalizeGameName, parseAppId } from './validation.js';
+import { MAX_APP_ID, MAX_IDLE_SESSIONS, normalizeGameName, parseAppId } from './validation.js';
+
+test('allows up to Steam\'s 32 simultaneous played AppIDs', () => {
+  assert.equal(MAX_IDLE_SESSIONS, 32);
+});
 
 test('parseAppId accepts valid integer IDs', () => {
   assert.equal(parseAppId(730), 730);

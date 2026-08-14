@@ -4,13 +4,20 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import {
+  createSteamAvatarDescriptor,
+  createSteamProfileImageDescriptor,
+  extractProfileDecorationAssetPaths,
   extractProfileBackgroundAssetPath,
   extractProfileBackgroundAssetPathFromHtml,
+  fetchPublicSteamProfileAvatar,
   fetchPublicSteamProfileBackground,
+  getActiveSteamProfileDecorations,
   getActiveSteamProfileBackground,
+  isAllowedSteamAvatarUrl,
   isAllowedSteamProfileBackgroundUrl,
   isAllowedSteamProfileBackgroundVideoUrl,
   getActiveSteamProfileBackgroundUrl,
+  parsePublicSteamProfileAvatar,
   parsePublicSteamProfileBackground
 } from './steam-profile.js';
 
@@ -18,9 +25,14 @@ const STEAM_ID = '76561198000000001';
 const ACCOUNT_ID = '39734273';
 const FIRST_ASSET = 'items/562260/6b71ae5b7c8a314d918e1610504eaf085571c2ce.jpg';
 const SECOND_ASSET = 'items/753/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png';
+const MINI_VIDEO = 'items/753/cccccccccccccccccccccccccccccccccccccccc.webm';
+const FRAME_ASSET = 'items/730/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png';
+const STATIC_FRAME_ASSET = 'items/730/dddddddddddddddddddddddddddddddddddddddd.png';
 const PUBLIC_ASSET = 'items/617670/ba85462313fec5557c0d7c73393570a9d3d86bce.jpg';
 const ANIMATED_POSTER = 'items/1328670/843cf3b9917330ee3afcb026f649f7f0effeb784.jpg';
 const ANIMATED_VIDEO = 'items/1328670/f0fab5f5d6fa6bd08c4ae68fdf2ab4a977265aa3.webm';
+const AVATAR_HASH = '06abb8fb6ad7a450ef67f90ac8a3b93c5dc4fb47';
+const AVATAR_URL = `https://avatars.akamai.steamstatic.com/${AVATAR_HASH}_full.jpg`;
 
 function makeVdfLine(steamId, profile) {
   return `"GetEquippedProfileItemsForUser${steamId}"  ${JSON.stringify(JSON.stringify(profile))}`;
@@ -34,18 +46,40 @@ function makePublicProfileHtml(steamId, assetPath = PUBLIC_ASSET) {
   `;
 }
 
+function makePublicProfileXml(steamId, avatarUrl = AVATAR_URL) {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <profile>
+      <steamID64>${steamId}</steamID64>
+      <avatarFull><![CDATA[${avatarUrl}]]></avatarFull>
+    </profile>`;
+}
+
 test('extracts the active user profile background from CRLF VDF content', () => {
   const localConfig = [
     '"UserLocalConfigStore"',
     '{',
     makeVdfLine(STEAM_ID, {
       profile_background: { image_large: FIRST_ASSET },
-      mini_profile_background: { image_large: SECOND_ASSET }
+      mini_profile_background: {
+        image_large: SECOND_ASSET,
+        movie_webm: MINI_VIDEO
+      },
+      avatar_frame: {
+        image_large: STATIC_FRAME_ASSET,
+        image_small: `images/${FRAME_ASSET}`
+      }
     }),
     '}'
   ].join('\r\n');
 
   assert.equal(extractProfileBackgroundAssetPath(localConfig, STEAM_ID), FIRST_ASSET);
+  assert.deepEqual(extractProfileDecorationAssetPaths(localConfig, STEAM_ID), {
+    background: FIRST_ASSET,
+    backgroundAnimation: null,
+    miniBackground: SECOND_ASSET,
+    miniBackgroundAnimation: MINI_VIDEO,
+    avatarFrame: FRAME_ASSET
+  });
 });
 
 test('requires the exact active-user key', () => {
@@ -208,7 +242,72 @@ test('rejects public-profile redirects away from Steam Community', async () => {
   assert.equal(requestCount, 1);
 });
 
+test('parses and validates the public full-size Steam avatar', () => {
+  assert.deepEqual(parsePublicSteamProfileAvatar(makePublicProfileXml(STEAM_ID), STEAM_ID), {
+    validProfile: true,
+    avatar: {
+      remoteUrl: AVATAR_URL,
+      revision: AVATAR_HASH
+    }
+  });
+  assert.deepEqual(
+    parsePublicSteamProfileAvatar(makePublicProfileXml('76561198000000002'), STEAM_ID),
+    { validProfile: false, avatar: null }
+  );
+  assert.deepEqual(
+    parsePublicSteamProfileAvatar(
+      makePublicProfileXml(STEAM_ID, `https://example.com/${AVATAR_HASH}_full.jpg`),
+      STEAM_ID
+    ),
+    { validProfile: false, avatar: null }
+  );
+  assert.deepEqual(createSteamAvatarDescriptor(AVATAR_URL), {
+    remoteUrl: AVATAR_URL,
+    revision: AVATAR_HASH
+  });
+  assert.equal(isAllowedSteamAvatarUrl(AVATAR_URL), true);
+  assert.equal(isAllowedSteamAvatarUrl(`${AVATAR_URL}?stale=1`), false);
+});
+
+test('fetches the current public avatar without a key or local avatar cache', async () => {
+  let requestedUrl;
+  const result = await fetchPublicSteamProfileAvatar(STEAM_ID, {
+    fetchImpl: async (url, options) => {
+      requestedUrl = { url: String(url), options };
+      return new Response(makePublicProfileXml(STEAM_ID), {
+        status: 200,
+        headers: { 'Content-Type': 'text/xml; charset=utf-8' }
+      });
+    }
+  });
+
+  assert.deepEqual(result, {
+    resolved: true,
+    avatar: {
+      remoteUrl: AVATAR_URL,
+      revision: AVATAR_HASH
+    }
+  });
+  const url = new URL(requestedUrl.url);
+  assert.equal(url.origin, 'https://steamcommunity.com');
+  assert.equal(url.pathname, `/profiles/${STEAM_ID}/`);
+  assert.equal(url.searchParams.get('xml'), '1');
+  assert.equal(Object.hasOwn(requestedUrl.options.headers, 'x-webapi-key'), false);
+  assert.equal(requestedUrl.options.redirect, 'manual');
+});
+
 test('builds a revisioned descriptor only for the current Steam asset host', () => {
+  assert.deepEqual(
+    createSteamProfileImageDescriptor(
+      `https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/${FRAME_ASSET}`
+    ),
+    {
+      assetPath: FRAME_ASSET,
+      remoteUrl: `https://shared.fastly.steamstatic.com/community_assets/images/${FRAME_ASSET}`,
+      revision: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    }
+  );
+  assert.equal(createSteamProfileImageDescriptor('https://example.com/frame.png'), null);
   assert.equal(
     isAllowedSteamProfileBackgroundUrl(
       `https://shared.fastly.steamstatic.com/community_assets/images/${FIRST_ASSET}`
@@ -249,6 +348,18 @@ test('reads and invalidates the cached active profile background safely', (conte
   );
 
   const activeUser = { steamId: STEAM_ID, accountId: ACCOUNT_ID };
+  assert.deepEqual(
+    getActiveSteamProfileDecorations(tempRoot, activeUser),
+    {
+      background: {
+        assetPath: FIRST_ASSET,
+        remoteUrl: `https://shared.fastly.steamstatic.com/community_assets/images/${FIRST_ASSET}`,
+        revision: '6b71ae5b7c8a314d918e1610504eaf085571c2ce'
+      },
+      miniBackground: null,
+      avatarFrame: null
+    }
+  );
   assert.deepEqual(
     getActiveSteamProfileBackground(tempRoot, activeUser),
     {

@@ -1,6 +1,6 @@
 {
   "name": "hollowrun",
-  "version": "1.2.9",
+  "version": "1.2.10",
   "description": "A zero-credential, local Steam idling tool for Windows that connects directly to your active Steam desktop client instance using Steamworks IPC.",
   "main": "electron-main.cjs",
   "scripts": {
@@ -17,7 +17,7 @@
     "build:worker": "dotnet publish HollowRun.Worker/HollowRun.Worker.csproj -c Release -r win-x64 --self-contained false -o HollowRun.Worker/publish",
     "build:splash": "dotnet publish HollowRun.Splash/HollowRun.Splash.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o HollowRun.Splash/publish",
     "build": "npm run build:worker && npm run build:splash && npm run generate:brand && npm run prepare:portable && npm run build:frontend && electron-builder --win",
-    "test": "npm test --prefix backend && node --test window-state.test.cjs"
+    "test": "npm test --prefix backend && node --test window-state.test.cjs startup-gate.test.cjs"
   },
   "engines": {
     "node": ">=22.12.0"
@@ -40,6 +40,7 @@
     },
     "files": [
       "electron-main.cjs",
+      "startup-gate.cjs",
       "loading.html",
       "loading-preload.cjs",
       "window-state.cjs",

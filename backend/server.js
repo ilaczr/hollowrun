@@ -5,12 +5,19 @@ import { spawn, execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { MAX_IDLE_SESSIONS, normalizeGameName, parseAppId } from './validation.js';
+import { parseCardDropCountWorkerOutput, parseCardDropWorkerOutput } from './card-drops.js';
 import {
+  fetchPublicSteamProfileAvatar,
   fetchPublicSteamProfileBackground,
+  getActiveSteamProfileDecorations,
   getActiveSteamProfileBackground,
+  isAllowedSteamAvatarUrl,
   isAllowedSteamProfileBackgroundUrl,
   isAllowedSteamProfileBackgroundVideoUrl
 } from './steam-profile.js';
+import {
+  fetchSteamProfileItemsEquipped
+} from './steam-web-profile.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,7 +34,6 @@ function readAppVersion() {
 }
 
 const APP_VERSION = readAppVersion();
-
 const app = express();
 const HOST = '127.0.0.1';
 const PORT = 3824;
@@ -119,6 +125,11 @@ let activeMetadataRequests = 0;
 let cacheSaveTimer = null;
 const metadataWaiters = [];
 const gameInfoRequests = new Map();
+const CARD_DROP_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
+const CARD_DROP_SCAN_TIMEOUT_MS = 2 * 60 * 1000;
+const CARD_DROP_STDOUT_LIMIT = 1024 * 1024;
+const cardDropCache = new Map();
+const cardDropRequests = new Map();
 
 function getDefaultHeaderImage(appId) {
   return `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`;
@@ -126,15 +137,19 @@ function getDefaultHeaderImage(appId) {
 
 const PROFILE_WALLPAPER_MAX_BYTES = 12 * 1024 * 1024;
 const PROFILE_WALLPAPER_ANIMATION_MAX_BYTES = 32 * 1024 * 1024;
-const PROFILE_WALLPAPER_CACHE_MAX_BYTES = 36 * 1024 * 1024;
-const PROFILE_WALLPAPER_CACHE_LIMIT = 3;
+const PROFILE_AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+const PROFILE_WALLPAPER_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+const PROFILE_WALLPAPER_CACHE_LIMIT = 5;
 const PROFILE_WALLPAPER_TIMEOUT_MS = 8000;
+const STEAM_PROFILE_ITEMS_REFRESH_INTERVAL_MS = 30_000;
 const PROFILE_WALLPAPER_CONTENT_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const PROFILE_WALLPAPER_VIDEO_CONTENT_TYPES = new Set(['video/webm', 'video/mp4']);
 const profileWallpaperImageCache = new Map();
 const profileWallpaperRequests = new Map();
 let profileWallpaperCacheBytes = 0;
 let launchProfileBackgroundState = null;
+let steamProfileItemsState = null;
+let publicSteamAvatarState = null;
 
 function getLaunchProfileBackground(steamPath, activeUser) {
   const steamId = String(activeUser?.steamId || '');
@@ -159,6 +174,115 @@ function getLaunchProfileBackground(steamPath, activeUser) {
   }
 
   return launchProfileBackgroundState.background;
+}
+
+function getSteamProfileItemsState(activeUser) {
+  const steamId = String(activeUser?.steamId || '');
+  if (!/^7656\d{13}$/.test(steamId)) return null;
+
+  if (steamProfileItemsState?.steamId !== steamId) {
+    steamProfileItemsState = {
+      steamId,
+      resolved: false,
+      decorations: null,
+      request: null,
+      lastAttemptAt: 0
+    };
+  }
+
+  const state = steamProfileItemsState;
+  const now = Date.now();
+  if (
+    !state.request
+    && now - state.lastAttemptAt >= STEAM_PROFILE_ITEMS_REFRESH_INTERVAL_MS
+  ) {
+    state.lastAttemptAt = now;
+    state.request = fetchSteamProfileItemsEquipped(steamId, {
+      userAgent: `HollowRun/${APP_VERSION}`
+    })
+      .then(result => {
+        if (steamProfileItemsState === state && result.resolved) {
+          state.resolved = true;
+          state.decorations = result.decorations;
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (steamProfileItemsState === state) state.request = null;
+      });
+  }
+
+  return state;
+}
+
+function getPublicSteamAvatarState(activeUser) {
+  const steamId = String(activeUser?.steamId || '');
+  if (!/^7656\d{13}$/.test(steamId)) return null;
+
+  if (publicSteamAvatarState?.steamId !== steamId) {
+    publicSteamAvatarState = {
+      steamId,
+      resolved: false,
+      avatar: null,
+      request: null,
+      lastAttemptAt: 0
+    };
+  }
+
+  const state = publicSteamAvatarState;
+  const now = Date.now();
+  if (
+    !state.request
+    && now - state.lastAttemptAt >= STEAM_PROFILE_ITEMS_REFRESH_INTERVAL_MS
+  ) {
+    state.lastAttemptAt = now;
+    state.request = fetchPublicSteamProfileAvatar(steamId, {
+      userAgent: `HollowRun/${APP_VERSION}`
+    })
+      .then(result => {
+        if (publicSteamAvatarState === state && result.resolved) {
+          state.resolved = true;
+          state.avatar = result.avatar;
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (publicSteamAvatarState === state) state.request = null;
+      });
+  }
+
+  return state;
+}
+
+function mergeProfileDecoration(preferred, fallback) {
+  if (!preferred) return fallback || null;
+  if (
+    preferred.animation
+    || !fallback?.animation
+    || preferred.assetPath.split('/')[1] !== fallback.assetPath.split('/')[1]
+  ) {
+    return preferred;
+  }
+
+  return Object.freeze({ ...preferred, animation: fallback.animation });
+}
+
+function getLaunchProfileDecorations(steamPath, activeUser) {
+  const localDecorations = getActiveSteamProfileDecorations(steamPath, activeUser);
+  const steamProfileState = getSteamProfileItemsState(activeUser);
+  const steamDecorations = steamProfileState?.resolved ? steamProfileState.decorations : null;
+  const publicBackground = getLaunchProfileBackground(steamPath, activeUser);
+  return {
+    background: mergeProfileDecoration(
+      steamDecorations?.background,
+      mergeProfileDecoration(localDecorations?.background, publicBackground)
+    ),
+    miniBackground: mergeProfileDecoration(
+      steamDecorations?.miniBackground,
+      localDecorations?.miniBackground
+    ),
+    avatarFrame: steamDecorations?.avatarFrame || localDecorations?.avatarFrame || null
+  };
 }
 
 function getCachedProfileWallpaper(cacheKey) {
@@ -239,6 +363,60 @@ async function downloadProfileWallpaper(background) {
       }
 
       const data = await readBoundedResponseBody(response, PROFILE_WALLPAPER_MAX_BYTES);
+      if (!data?.length) return null;
+
+      const image = Object.freeze({ data, contentType });
+      cacheProfileWallpaper(cacheKey, image);
+      return image;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+
+  profileWallpaperRequests.set(cacheKey, request);
+  try {
+    return await request;
+  } finally {
+    profileWallpaperRequests.delete(cacheKey);
+  }
+}
+
+async function downloadPublicSteamAvatar(avatar) {
+  if (!avatar || !isAllowedSteamAvatarUrl(avatar.remoteUrl)) return null;
+
+  const cacheKey = `avatar:${avatar.revision}`;
+  const cached = getCachedProfileWallpaper(cacheKey);
+  if (cached) return cached;
+  if (profileWallpaperRequests.has(cacheKey)) return profileWallpaperRequests.get(cacheKey);
+
+  const request = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROFILE_WALLPAPER_TIMEOUT_MS);
+    try {
+      const response = await fetch(avatar.remoteUrl, {
+        redirect: 'error',
+        headers: {
+          Accept: 'image/jpeg',
+          'User-Agent': `HollowRun/${APP_VERSION}`
+        },
+        signal: controller.signal
+      });
+      if (!response.ok || !isAllowedSteamAvatarUrl(response.url)) return null;
+
+      const contentType = String(response.headers.get('content-type') || '')
+        .split(';', 1)[0]
+        .trim()
+        .toLowerCase();
+      if (contentType !== 'image/jpeg') return null;
+
+      const advertisedLength = Number(response.headers.get('content-length'));
+      if (Number.isFinite(advertisedLength) && advertisedLength > PROFILE_AVATAR_MAX_BYTES) {
+        return null;
+      }
+
+      const data = await readBoundedResponseBody(response, PROFILE_AVATAR_MAX_BYTES);
       if (!data?.length) return null;
 
       const image = Object.freeze({ data, contentType });
@@ -926,17 +1104,11 @@ function getActiveSteamUser(steamPath) {
   return null;
 }
 
-function getActiveSteamAvatarPath(steamPath, activeUser) {
-  if (!steamPath || !/^7656\d{13}$/.test(String(activeUser?.steamId || ''))) return null;
-
-  const avatarDirectory = path.join(steamPath, 'config', 'avatarcache');
-  for (const extension of ['png', 'jpg', 'jpeg']) {
-    const avatarPath = path.join(avatarDirectory, `${activeUser.steamId}.${extension}`);
-    try {
-      if (fs.statSync(avatarPath).isFile()) return avatarPath;
-    } catch (error) {}
-  }
-  return null;
+function getConnectedSteamUser(steamPath) {
+  const runningAccountId = getRunningSteamAccountId();
+  if (!runningAccountId) return null;
+  const activeUser = getActiveSteamUser(steamPath);
+  return activeUser?.accountId === runningAccountId ? activeUser : null;
 }
 
 function getOwnershipFingerprint(steamPath, steamId, candidateIds) {
@@ -962,9 +1134,9 @@ function requestOwnedAppIdsFromWorker(candidateIds, expectedSteamId) {
 
     let child;
     try {
-      child = spawn(workerExe, ['--verify-library'], {
+      child = spawn(workerExe, ['--verify-library', expectedSteamId], {
         cwd: path.dirname(workerExe),
-        env: { ...process.env, SteamAppId: '480', SteamGameId: '480' },
+        env: getSteamClientHelperEnvironment(),
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true
       });
@@ -1172,6 +1344,172 @@ function getWorkerExecutablePath() {
   return null;
 }
 
+function getSteamClientHelperEnvironment() {
+  const environment = { ...process.env };
+  for (const key of Object.keys(environment)) {
+    const normalizedKey = key.toLowerCase();
+    if (normalizedKey === 'steamappid' || normalizedKey === 'steamgameid') delete environment[key];
+  }
+  return environment;
+}
+
+function requestCardDropsFromWorker(expectedSteamId, onProgress = () => {}) {
+  return new Promise(resolve => {
+    const workerExe = getWorkerExecutablePath();
+    if (!workerExe) return resolve({ success: false, reason: 'unavailable' });
+
+    let child;
+    try {
+      child = spawn(workerExe, ['--scan-card-drops', expectedSteamId], {
+        cwd: path.dirname(workerExe),
+        env: getSteamClientHelperEnvironment(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true
+      });
+    } catch {
+      return resolve({ success: false, reason: 'unavailable' });
+    }
+
+    let settled = false;
+    let stdout = '';
+    let lineBuffer = '';
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    };
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish({ success: false, reason: 'unavailable' });
+    }, CARD_DROP_SCAN_TIMEOUT_MS);
+
+    child.stdout.on('data', data => {
+      if (stdout.length + data.length > CARD_DROP_STDOUT_LIMIT) {
+        child.kill();
+        finish({ success: false, reason: 'unavailable' });
+        return;
+      }
+      const chunk = data.toString();
+      stdout += chunk;
+      lineBuffer += chunk;
+      let newlineIndex;
+      while ((newlineIndex = lineBuffer.indexOf('\n')) >= 0) {
+        const line = lineBuffer.slice(0, newlineIndex).trim();
+        lineBuffer = lineBuffer.slice(newlineIndex + 1);
+        const progress = parseCardDropWorkerOutput(line, expectedSteamId);
+        if (progress?.success && progress.progress) {
+          try { onProgress(progress); } catch {}
+        }
+      }
+    });
+    child.stderr.on('data', () => {});
+    child.on('error', () => finish({ success: false, reason: 'unavailable' }));
+    child.on('close', () => {
+      finish(parseCardDropWorkerOutput(stdout, expectedSteamId)
+        || { success: false, reason: 'unavailable' });
+    });
+  });
+}
+
+function requestCardDropCountFromWorker(expectedSteamId, appId) {
+  return new Promise(resolve => {
+    const workerExe = getWorkerExecutablePath();
+    if (!workerExe) return resolve({ success: false, reason: 'unavailable' });
+
+    let child;
+    try {
+      child = spawn(workerExe, ['--check-card-drops', expectedSteamId, String(appId)], {
+        cwd: path.dirname(workerExe),
+        env: getSteamClientHelperEnvironment(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true
+      });
+    } catch {
+      return resolve({ success: false, reason: 'unavailable' });
+    }
+
+    let settled = false;
+    let stdout = '';
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    };
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish({ success: false, reason: 'unavailable' });
+    }, 30000);
+
+    child.stdout.on('data', data => {
+      if (stdout.length + data.length > 64 * 1024) {
+        child.kill();
+        finish({ success: false, reason: 'unavailable' });
+        return;
+      }
+      stdout += data.toString();
+    });
+    child.stderr.on('data', () => {});
+    child.on('error', () => finish({ success: false, reason: 'unavailable' }));
+    child.on('close', () => {
+      finish(parseCardDropCountWorkerOutput(stdout, expectedSteamId, appId)
+        || { success: false, reason: 'unavailable' });
+    });
+  });
+}
+
+async function getCardDropsForActiveAccount(steamId, force = false, onProgress = null) {
+  const cached = cardDropCache.get(steamId);
+  if (!force && cached && Date.now() - cached.cachedAt < CARD_DROP_CACHE_MAX_AGE_MS) {
+    return cached.result;
+  }
+  const existingRequest = cardDropRequests.get(steamId);
+  if (existingRequest) {
+    if (typeof onProgress === 'function') existingRequest.listeners.add(onProgress);
+    return existingRequest.promise;
+  }
+
+  const listeners = new Set();
+  if (typeof onProgress === 'function') listeners.add(onProgress);
+  const request = requestCardDropsFromWorker(steamId, progress => {
+    for (const listener of listeners) {
+      try { listener(progress); } catch {}
+    }
+  })
+    .then(result => {
+      if (result.success) {
+        if (cardDropCache.size >= 4 && !cardDropCache.has(steamId)) cardDropCache.clear();
+        cardDropCache.set(steamId, { cachedAt: Date.now(), result });
+      }
+      return result;
+    })
+    .finally(() => {
+      if (cardDropRequests.get(steamId)?.promise === request) cardDropRequests.delete(steamId);
+    });
+  cardDropRequests.set(steamId, { promise: request, listeners });
+  return request;
+}
+
+function updateCachedCardDropCount(steamId, appId, dropsRemaining) {
+  const cached = cardDropCache.get(steamId);
+  if (!cached?.result?.success || !Array.isArray(cached.result.games)) return;
+
+  const games = new Map(cached.result.games.map(game => [game.appId, game]));
+  if (dropsRemaining > 0) {
+    games.set(appId, { appId, dropsRemaining });
+  } else {
+    games.delete(appId);
+  }
+  cardDropCache.set(steamId, {
+    ...cached,
+    result: {
+      ...cached.result,
+      games: Array.from(games.values()).sort((left, right) => left.appId - right.appId)
+    }
+  });
+}
+
 function startIdleSession(appId, gameName = '') {
   return new Promise((resolve) => {
     if (activeSessions.has(appId)) {
@@ -1319,28 +1657,47 @@ app.get('/api/health', (req, res) => {
 // Status
 app.get('/api/status', (req, res) => {
   const steamPath = getSteamPath();
-  const activeUser = getActiveSteamUser(steamPath);
-  const avatarPath = getActiveSteamAvatarPath(steamPath, activeUser);
-  const profileBackground = getLaunchProfileBackground(steamPath, activeUser);
+  const activeUser = getConnectedSteamUser(steamPath);
+  const avatarState = getPublicSteamAvatarState(activeUser);
+  const avatar = avatarState?.resolved ? avatarState.avatar : null;
+  const profileDecorations = getLaunchProfileDecorations(steamPath, activeUser);
+  const profileBackground = profileDecorations.background;
   const profileWallpaperUrl = activeUser && profileBackground
     ? `/api/steam-profile-background/${activeUser.steamId}?v=${profileBackground.revision}`
     : null;
   const profileWallpaperVideoUrl = activeUser && profileBackground?.animation
     ? `/api/steam-profile-background/${activeUser.steamId}/animation?v=${profileBackground.animation.revision}`
     : null;
+  const miniProfileBackground = profileDecorations.miniBackground;
+  const miniProfileBackgroundUrl = activeUser && miniProfileBackground
+    ? `/api/steam-profile-decoration/${activeUser.steamId}/mini-background?v=${miniProfileBackground.revision}`
+    : null;
+  const miniProfileBackgroundVideoUrl = activeUser && miniProfileBackground?.animation
+    ? `/api/steam-profile-decoration/${activeUser.steamId}/mini-background/animation?v=${miniProfileBackground.animation.revision}`
+    : null;
+  const avatarFrameUrl = activeUser && profileDecorations.avatarFrame
+    ? `/api/steam-profile-decoration/${activeUser.steamId}/avatar-frame?v=${profileDecorations.avatarFrame.revision}`
+    : null;
   res.json({
     success: true,
     appVersion: APP_VERSION,
     steamInstalled: !!steamPath,
+    steamClientConnected: !!activeUser,
     maxIdleSessions: MAX_IDLE_SESSIONS,
     activeUser: activeUser
       ? {
           personaName: activeUser.personaName,
           steamId: activeUser.steamId,
-          avatarUrl: avatarPath ? `/api/steam-avatar/${activeUser.steamId}` : null,
+          avatarUrl: avatar
+            ? `/api/steam-avatar/${activeUser.steamId}?v=${avatar.revision}`
+            : null,
           profileWallpaperUrl,
           profileWallpaperVideoUrl,
-          profileWallpaperVideoType: profileBackground?.animation?.contentType || null
+          profileWallpaperVideoType: profileBackground?.animation?.contentType || null,
+          miniProfileBackgroundUrl,
+          miniProfileBackgroundVideoUrl,
+          miniProfileBackgroundVideoType: miniProfileBackground?.animation?.contentType || null,
+          avatarFrameUrl
         }
       : {
           personaName: 'Steam Client',
@@ -1348,22 +1705,42 @@ app.get('/api/status', (req, res) => {
           avatarUrl: null,
           profileWallpaperUrl: null,
           profileWallpaperVideoUrl: null,
-          profileWallpaperVideoType: null
+          profileWallpaperVideoType: null,
+          miniProfileBackgroundUrl: null,
+          miniProfileBackgroundVideoUrl: null,
+          miniProfileBackgroundVideoType: null,
+          avatarFrameUrl: null
         },
     activeSessionsCount: activeSessions.size
   });
 });
 
-// The avatar cache is account-specific. Only expose the currently active user.
-app.get('/api/steam-avatar/:steamid', (req, res) => {
+// Resolve the connected account's public avatar through Steam Community and
+// proxy only that validated image through a revisioned same-origin route.
+app.get('/api/steam-avatar/:steamid', async (req, res) => {
   const steamPath = getSteamPath();
-  const activeUser = getActiveSteamUser(steamPath);
+  const activeUser = getConnectedSteamUser(steamPath);
   if (!activeUser || req.params.steamid !== activeUser.steamId) return res.status(404).end();
 
-  const avatarPath = getActiveSteamAvatarPath(steamPath, activeUser);
-  if (!avatarPath) return res.status(404).end();
-  res.setHeader('Cache-Control', 'private, max-age=3600');
-  res.sendFile(avatarPath);
+  const avatarState = getPublicSteamAvatarState(activeUser);
+  const avatar = avatarState?.resolved ? avatarState.avatar : null;
+  if (!avatar) return res.status(404).end();
+
+  const canonicalUrl = `/api/steam-avatar/${activeUser.steamId}?v=${avatar.revision}`;
+  if (req.query.v !== avatar.revision) return res.redirect(307, canonicalUrl);
+
+  const etag = `"avatar-${avatar.revision}"`;
+  res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
+  res.setHeader('ETag', etag);
+  if (req.get('if-none-match') === etag) return res.status(304).end();
+
+  const image = await downloadPublicSteamAvatar(avatar);
+  if (!image) return res.status(502).end();
+
+  res.setHeader('Content-Type', image.contentType);
+  res.setHeader('Content-Length', image.data.length);
+  res.setHeader('Content-Disposition', 'inline');
+  res.send(image.data);
 });
 
 // Proxy only the active account's equipped profile background. It is resolved
@@ -1374,7 +1751,7 @@ app.get('/api/steam-profile-background/:steamid', async (req, res) => {
   const activeUser = getActiveSteamUser(steamPath);
   if (!activeUser || req.params.steamid !== activeUser.steamId) return res.status(404).end();
 
-  const background = getLaunchProfileBackground(steamPath, activeUser);
+  const background = getLaunchProfileDecorations(steamPath, activeUser).background;
   if (!background) return res.status(404).end();
 
   const canonicalUrl = `/api/steam-profile-background/${activeUser.steamId}?v=${background.revision}`;
@@ -1399,7 +1776,7 @@ app.get('/api/steam-profile-background/:steamid/animation', async (req, res) => 
   const activeUser = getActiveSteamUser(steamPath);
   if (!activeUser || req.params.steamid !== activeUser.steamId) return res.status(404).end();
 
-  const background = getLaunchProfileBackground(steamPath, activeUser);
+  const background = getLaunchProfileDecorations(steamPath, activeUser).background;
   const animation = background?.animation;
   if (!animation) return res.status(404).end();
 
@@ -1416,6 +1793,64 @@ app.get('/api/steam-profile-background/:steamid/animation', async (req, res) => 
 
   res.setHeader('Content-Disposition', 'inline');
   sendBufferWithRange(req, res, video);
+});
+
+app.get('/api/steam-profile-decoration/:steamid/mini-background/animation', async (req, res) => {
+  const steamPath = getSteamPath();
+  const activeUser = getConnectedSteamUser(steamPath);
+  if (!activeUser || req.params.steamid !== activeUser.steamId) return res.status(404).end();
+
+  const animation = getLaunchProfileDecorations(
+    steamPath,
+    activeUser
+  ).miniBackground?.animation;
+  if (!animation) return res.status(404).end();
+
+  const canonicalUrl = `/api/steam-profile-decoration/${activeUser.steamId}/mini-background/animation?v=${animation.revision}`;
+  if (req.query.v !== animation.revision) return res.redirect(307, canonicalUrl);
+
+  const etag = `"mini-background-animation-${animation.revision}"`;
+  res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
+  res.setHeader('ETag', etag);
+  if (!req.get('range') && req.get('if-none-match') === etag) return res.status(304).end();
+
+  const video = await downloadProfileWallpaperAnimation(animation);
+  if (!video) return res.status(502).end();
+
+  res.setHeader('Content-Disposition', 'inline');
+  sendBufferWithRange(req, res, video);
+});
+
+app.get('/api/steam-profile-decoration/:steamid/:kind', async (req, res) => {
+  const kindMap = {
+    'mini-background': 'miniBackground',
+    'avatar-frame': 'avatarFrame'
+  };
+  const decorationKey = kindMap[req.params.kind];
+  if (!decorationKey) return res.status(404).end();
+
+  const steamPath = getSteamPath();
+  const activeUser = getConnectedSteamUser(steamPath);
+  if (!activeUser || req.params.steamid !== activeUser.steamId) return res.status(404).end();
+
+  const decoration = getLaunchProfileDecorations(steamPath, activeUser)[decorationKey];
+  if (!decoration) return res.status(404).end();
+
+  const canonicalUrl = `/api/steam-profile-decoration/${activeUser.steamId}/${req.params.kind}?v=${decoration.revision}`;
+  if (req.query.v !== decoration.revision) return res.redirect(307, canonicalUrl);
+
+  const etag = `"${req.params.kind}-${decoration.revision}"`;
+  res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
+  res.setHeader('ETag', etag);
+  if (req.get('if-none-match') === etag) return res.status(304).end();
+
+  const image = await downloadProfileWallpaper(decoration);
+  if (!image) return res.status(502).end();
+
+  res.setHeader('Content-Type', image.contentType);
+  res.setHeader('Content-Length', image.data.length);
+  res.setHeader('Content-Disposition', 'inline');
+  res.send(image.data);
 });
 
 // Serve only known Steam artwork filenames from the numeric AppID directory.
@@ -1456,6 +1891,70 @@ app.get('/api/games', async (req, res) => {
   } catch (error) {
     res.status(500).json({ success: false, error: 'Could not verify the active Steam library.' });
   }
+});
+
+// Uses the authenticated session already held by the running Steam client.
+// The worker keeps Steam's short-lived Community token in memory only.
+app.get('/api/card-drops', async (req, res) => {
+  const steamPath = getSteamPath();
+  const activeUser = getActiveSteamUser(steamPath);
+  if (!activeUser || !/^7656\d{13}$/.test(activeUser.steamId)) {
+    return res.status(503).json({ success: false, reason: 'steam-client-unavailable' });
+  }
+
+  const result = await getCardDropsForActiveAccount(activeUser.steamId, req.query.force === '1');
+  if (!result.success) return res.status(503).json(result);
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json(result);
+});
+
+app.get('/api/card-drops/stream', async (req, res) => {
+  const steamPath = getSteamPath();
+  const activeUser = getActiveSteamUser(steamPath);
+  if (!activeUser || !/^7656\d{13}$/.test(activeUser.steamId)) {
+    return res.status(503).json({ success: false, reason: 'steam-client-unavailable' });
+  }
+
+  res.status(200);
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.flushHeaders();
+
+  let disconnected = false;
+  res.on('close', () => {
+    if (!res.writableEnded) disconnected = true;
+  });
+  const send = message => {
+    if (!disconnected && !res.writableEnded) res.write(`${JSON.stringify(message)}\n`);
+  };
+
+  const result = await getCardDropsForActiveAccount(
+    activeUser.steamId,
+    req.query.force === '1',
+    send
+  );
+  send(result);
+  if (!res.writableEnded) res.end();
+});
+
+app.get('/api/card-drops/check/:appid', async (req, res) => {
+  const appId = parseAppId(req.params.appid);
+  if (appId === null || appId <= 10) {
+    return res.status(400).json({ success: false, reason: 'invalid-appid' });
+  }
+
+  const steamPath = getSteamPath();
+  const activeUser = getActiveSteamUser(steamPath);
+  if (!activeUser || !/^7656\d{13}$/.test(activeUser.steamId)) {
+    return res.status(503).json({ success: false, reason: 'steam-client-unavailable' });
+  }
+
+  const result = await requestCardDropCountFromWorker(activeUser.steamId, appId);
+  if (!result.success) return res.status(503).json(result);
+  updateCachedCardDropCount(activeUser.steamId, appId, result.dropsRemaining);
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json(result);
 });
 
 // Fetch detailed Steam info for a specific game

@@ -9,16 +9,150 @@ const PROFILE_BACKGROUND_VIDEO_ASSET_PATTERN =
   /^items\/[1-9]\d*\/[a-f0-9]{40}\.(?:webm|mp4)$/i;
 const PROFILE_BACKGROUND_PATH_PREFIX = '/community_assets/images/';
 const PUBLIC_PROFILE_MAX_BYTES = 1_500_000;
+const PUBLIC_PROFILE_AVATAR_MAX_BYTES = 512_000;
 const PUBLIC_PROFILE_TIMEOUT_MS = 6000;
+const STEAM_AVATAR_HOSTS = new Set([
+  'avatars.akamai.steamstatic.com',
+  'avatars.cloudflare.steamstatic.com',
+  'avatars.fastly.steamstatic.com'
+]);
 const profileBackgroundCache = new Map();
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-export function extractProfileBackgroundAssetPath(localConfig, steamId) {
+function normalizeSteamProfileAssetPath(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  let candidate = value.trim().replace(/\\/g, '/');
+
+  if (/^https:\/\//i.test(candidate)) {
+    try {
+      const url = new URL(candidate);
+      if (url.username || url.password || url.search || url.hash) return null;
+      const host = url.hostname.toLowerCase();
+      if (host === 'shared.fastly.steamstatic.com') {
+        const prefix = '/community_assets/images/';
+        if (!url.pathname.startsWith(prefix)) return null;
+        candidate = url.pathname.slice(prefix.length);
+      } else if (
+        host === 'cdn.cloudflare.steamstatic.com'
+        || host === 'cdn.akamai.steamstatic.com'
+      ) {
+        const prefix = '/steamcommunity/public/images/';
+        if (!url.pathname.startsWith(prefix)) return null;
+        candidate = url.pathname.slice(prefix.length);
+      } else {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  candidate = candidate
+    .replace(/^\/+/, '')
+    .replace(/^community_assets\/images\//i, '')
+    .replace(/^steamcommunity\/public\/images\//i, '')
+    .replace(/^images\//i, '');
+  return PROFILE_BACKGROUND_ASSET_PATTERN.test(candidate) ? candidate : null;
+}
+
+function normalizeSteamProfileVideoAssetPath(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  let candidate = value.trim().replace(/\\/g, '/');
+
+  if (/^https:\/\//i.test(candidate)) {
+    try {
+      const url = new URL(candidate);
+      if (url.username || url.password || url.search || url.hash) return null;
+      if (url.hostname.toLowerCase() !== 'shared.fastly.steamstatic.com') return null;
+      if (!url.pathname.startsWith(PROFILE_BACKGROUND_PATH_PREFIX)) return null;
+      candidate = url.pathname.slice(PROFILE_BACKGROUND_PATH_PREFIX.length);
+    } catch {
+      return null;
+    }
+  }
+
+  candidate = candidate
+    .replace(/^\/+/, '')
+    .replace(/^community_assets\/images\//i, '')
+    .replace(/^images\//i, '');
+  return PROFILE_BACKGROUND_VIDEO_ASSET_PATTERN.test(candidate) ? candidate : null;
+}
+
+export function createSteamProfileImageDescriptor(value) {
+  const assetPath = normalizeSteamProfileAssetPath(value);
+  if (!assetPath) return null;
+  const revision = assetPath.match(/\/([a-f0-9]{40})\.[^.]+$/i)?.[1]?.toLowerCase();
+  const remoteUrl = `${PROFILE_BACKGROUND_BASE_URL}${assetPath}`;
+  return revision && isAllowedSteamProfileBackgroundUrl(remoteUrl)
+    ? Object.freeze({ assetPath, remoteUrl, revision })
+    : null;
+}
+
+export function isAllowedSteamAvatarUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:'
+      && STEAM_AVATAR_HOSTS.has(url.hostname.toLowerCase())
+      && !url.username
+      && !url.password
+      && !url.search
+      && !url.hash
+      && /^\/[a-f0-9]{40}_full\.jpg$/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+export function createSteamAvatarDescriptor(value) {
+  if (!isAllowedSteamAvatarUrl(value)) return null;
+  const remoteUrl = new URL(value).toString();
+  const revision = new URL(value).pathname.match(/^\/([a-f0-9]{40})_full\.jpg$/i)?.[1]
+    ?.toLowerCase();
+  return revision ? Object.freeze({ remoteUrl, revision }) : null;
+}
+
+export function createSteamProfileDecorationDescriptor(imageValue, videoValue = null) {
+  const image = createSteamProfileImageDescriptor(imageValue);
+  if (!image) return null;
+
+  const videoAssetPath = normalizeSteamProfileVideoAssetPath(videoValue);
+  if (!videoAssetPath || videoAssetPath.split('/')[1] !== image.assetPath.split('/')[1]) {
+    return image;
+  }
+
+  const revision = videoAssetPath.match(/\/([a-f0-9]{40})\.[^.]+$/i)?.[1]?.toLowerCase();
+  const remoteUrl = `${PROFILE_BACKGROUND_BASE_URL}${videoAssetPath}`;
+  if (!revision || !isAllowedSteamProfileBackgroundVideoUrl(remoteUrl)) return image;
+
+  return Object.freeze({
+    ...image,
+    animation: Object.freeze({
+      assetPath: videoAssetPath,
+      remoteUrl,
+      revision,
+      contentType: videoAssetPath.toLowerCase().endsWith('.webm')
+        ? 'video/webm'
+        : 'video/mp4'
+    })
+  });
+}
+
+function emptyProfileDecorationAssetPaths() {
+  return {
+    background: null,
+    backgroundAnimation: null,
+    miniBackground: null,
+    miniBackgroundAnimation: null,
+    avatarFrame: null
+  };
+}
+
+export function extractProfileDecorationAssetPaths(localConfig, steamId) {
   if (typeof localConfig !== 'string' || !/^7656\d{13}$/.test(String(steamId || ''))) {
-    return null;
+    return emptyProfileDecorationAssetPaths();
   }
 
   const cacheKey = `GetEquippedProfileItemsForUser${steamId}`;
@@ -27,18 +161,49 @@ export function extractProfileBackgroundAssetPath(localConfig, steamId) {
     'm'
   );
   const match = localConfig.match(linePattern);
-  if (!match) return null;
+  if (!match) return emptyProfileDecorationAssetPaths();
 
   try {
     const serializedProfile = JSON.parse(`"${match[1]}"`);
     const profile = JSON.parse(serializedProfile);
-    const assetPath = profile?.profile_background?.image_large;
-    return typeof assetPath === 'string' && PROFILE_BACKGROUND_ASSET_PATTERN.test(assetPath)
-      ? assetPath
-      : null;
+    const profileBackground = profile?.profile_background;
+    const miniProfileBackground = profile?.mini_profile_background;
+    return {
+      background: normalizeSteamProfileAssetPath(
+        profileBackground?.image_large || profileBackground?.image_small
+      ),
+      backgroundAnimation: normalizeSteamProfileVideoAssetPath(
+        profileBackground?.movie_webm
+        || profileBackground?.movie_mp4
+        || profileBackground?.item_movie_webm
+        || profileBackground?.item_movie_mp4
+      ),
+      miniBackground: normalizeSteamProfileAssetPath(
+        miniProfileBackground?.image_large
+        || miniProfileBackground?.image_small
+      ),
+      miniBackgroundAnimation: normalizeSteamProfileVideoAssetPath(
+        miniProfileBackground?.movie_webm_small
+        || miniProfileBackground?.movie_webm
+        || miniProfileBackground?.movie_mp4_small
+        || miniProfileBackground?.movie_mp4
+        || miniProfileBackground?.item_movie_webm_small
+        || miniProfileBackground?.item_movie_webm
+        || miniProfileBackground?.item_movie_mp4_small
+        || miniProfileBackground?.item_movie_mp4
+      ),
+      avatarFrame: normalizeSteamProfileAssetPath(
+        profile?.avatar_frame?.image_small
+        || profile?.avatar_frame?.image_large
+      )
+    };
   } catch {
-    return null;
+    return emptyProfileDecorationAssetPaths();
   }
+}
+
+export function extractProfileBackgroundAssetPath(localConfig, steamId) {
+  return extractProfileDecorationAssetPaths(localConfig, steamId).background;
 }
 
 function decodeHtmlAttribute(value) {
@@ -167,37 +332,7 @@ export function extractProfileBackgroundAssetPathFromHtml(profileHtml) {
 }
 
 function createProfileBackgroundDescriptor(assetPath, animation = null) {
-  if (typeof assetPath !== 'string' || !PROFILE_BACKGROUND_ASSET_PATTERN.test(assetPath)) {
-    return null;
-  }
-
-  const revision = assetPath.match(/\/([a-f0-9]{40})\.[^.]+$/i)?.[1]?.toLowerCase();
-  const remoteUrl = `${PROFILE_BACKGROUND_BASE_URL}${assetPath}`;
-  if (!revision || !isAllowedSteamProfileBackgroundUrl(remoteUrl)) return null;
-
-  const descriptor = { assetPath, remoteUrl, revision };
-  if (
-    animation
-    && typeof animation.assetPath === 'string'
-    && PROFILE_BACKGROUND_VIDEO_ASSET_PATTERN.test(animation.assetPath)
-    && animation.assetPath.split('/')[1] === assetPath.split('/')[1]
-  ) {
-    const videoRevision = animation.assetPath.match(/\/([a-f0-9]{40})\.[^.]+$/i)?.[1]?.toLowerCase();
-    const videoRemoteUrl = `${PROFILE_BACKGROUND_BASE_URL}${animation.assetPath}`;
-    const contentType = animation.assetPath.toLowerCase().endsWith('.webm')
-      ? 'video/webm'
-      : 'video/mp4';
-    if (videoRevision && isAllowedSteamProfileBackgroundVideoUrl(videoRemoteUrl)) {
-      descriptor.animation = Object.freeze({
-        assetPath: animation.assetPath,
-        remoteUrl: videoRemoteUrl,
-        revision: videoRevision,
-        contentType
-      });
-    }
-  }
-
-  return Object.freeze(descriptor);
+  return createSteamProfileDecorationDescriptor(assetPath, animation?.assetPath || animation);
 }
 
 export function parsePublicSteamProfileBackground(profileHtml, expectedSteamId) {
@@ -220,6 +355,29 @@ export function parsePublicSteamProfileBackground(profileHtml, expectedSteamId) 
         background: createProfileBackgroundDescriptor(result.assetPath, result.animation)
       }
     : { validProfile: false, background: null };
+}
+
+export function parsePublicSteamProfileAvatar(profileXml, expectedSteamId) {
+  const steamId = String(expectedSteamId || '');
+  if (typeof profileXml !== 'string' || !/^7656\d{13}$/.test(steamId)) {
+    return { validProfile: false, avatar: null };
+  }
+
+  const identityMatch = profileXml.match(
+    /<steamID64>\s*(?:<!\[CDATA\[\s*)?(7656\d{13})(?:\s*\]\]>)?\s*<\/steamID64>/i
+  );
+  if (identityMatch?.[1] !== steamId) {
+    return { validProfile: false, avatar: null };
+  }
+
+  const avatarMatch = profileXml.match(/<avatarFull>\s*(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?\s*<\/avatarFull>/i);
+  if (!avatarMatch) return { validProfile: false, avatar: null };
+
+  const avatarUrl = decodeHtmlAttribute(avatarMatch[1]).trim();
+  const avatar = createSteamAvatarDescriptor(avatarUrl);
+  return avatar
+    ? { validProfile: true, avatar }
+    : { validProfile: false, avatar: null };
 }
 
 export function isAllowedSteamProfileBackgroundUrl(value) {
@@ -264,7 +422,7 @@ function isAllowedSteamCommunityProfileUrl(value) {
   }
 }
 
-async function readBoundedHtmlResponse(response, maximumBytes) {
+async function readBoundedTextResponse(response, maximumBytes) {
   const advertisedLength = Number(response.headers.get('content-length'));
   if (Number.isFinite(advertisedLength) && advertisedLength > maximumBytes) {
     return null;
@@ -337,7 +495,7 @@ export async function fetchPublicSteamProfileBackground(
         return { resolved: false, background: null };
       }
 
-      const profileHtml = await readBoundedHtmlResponse(response, maximumBytes);
+      const profileHtml = await readBoundedTextResponse(response, maximumBytes);
       if (profileHtml === null) return { resolved: false, background: null };
 
       const parsed = parsePublicSteamProfileBackground(profileHtml, steamId);
@@ -354,7 +512,76 @@ export async function fetchPublicSteamProfileBackground(
   return { resolved: false, background: null };
 }
 
-export function getActiveSteamProfileBackground(steamPath, activeUser) {
+export async function fetchPublicSteamProfileAvatar(
+  steamId,
+  {
+    fetchImpl = globalThis.fetch,
+    maximumBytes = PUBLIC_PROFILE_AVATAR_MAX_BYTES,
+    timeoutMs = PUBLIC_PROFILE_TIMEOUT_MS,
+    userAgent = 'HollowRun Desktop'
+  } = {}
+) {
+  if (!/^7656\d{13}$/.test(String(steamId || '')) || typeof fetchImpl !== 'function') {
+    return { resolved: false, avatar: null };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let currentUrl = new URL(`https://steamcommunity.com/profiles/${steamId}/?xml=1`);
+
+  try {
+    for (let redirectCount = 0; redirectCount <= 2; redirectCount += 1) {
+      const response = await fetchImpl(currentUrl, {
+        redirect: 'manual',
+        headers: {
+          Accept: 'application/xml,text/xml;q=0.9',
+          'Cache-Control': 'no-cache',
+          Pragma: 'no-cache',
+          'User-Agent': userAgent
+        },
+        signal: controller.signal
+      });
+
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get('location');
+        if (!location || redirectCount === 2) return { resolved: false, avatar: null };
+        const nextUrl = new URL(location, currentUrl);
+        if (!isAllowedSteamCommunityProfileUrl(nextUrl)) {
+          return { resolved: false, avatar: null };
+        }
+        try {
+          await response.body?.cancel();
+        } catch {}
+        currentUrl = nextUrl;
+        continue;
+      }
+
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      if (
+        !response.ok
+        || (!contentType.startsWith('text/xml') && !contentType.startsWith('application/xml'))
+      ) {
+        return { resolved: false, avatar: null };
+      }
+
+      const profileXml = await readBoundedTextResponse(response, maximumBytes);
+      if (profileXml === null) return { resolved: false, avatar: null };
+
+      const parsed = parsePublicSteamProfileAvatar(profileXml, steamId);
+      return parsed.validProfile
+        ? { resolved: true, avatar: parsed.avatar }
+        : { resolved: false, avatar: null };
+    }
+  } catch {
+    return { resolved: false, avatar: null };
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  return { resolved: false, avatar: null };
+}
+
+export function getActiveSteamProfileDecorations(steamPath, activeUser) {
   const steamId = String(activeUser?.steamId || '');
   const accountId = String(activeUser?.accountId || '');
   if (
@@ -378,19 +605,33 @@ export function getActiveSteamProfileBackground(steamPath, activeUser) {
 
   const fingerprint = `${localConfigPath}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
   const cached = profileBackgroundCache.get(steamId);
-  if (cached?.fingerprint === fingerprint) return cached.background;
+  if (cached?.fingerprint === fingerprint) return cached.decorations;
 
-  let background = null;
+  let decorations = null;
   try {
     const localConfig = fs.readFileSync(localConfigPath, 'utf8');
-    const assetPath = extractProfileBackgroundAssetPath(localConfig, steamId);
-    background = createProfileBackgroundDescriptor(assetPath);
+    const assetPaths = extractProfileDecorationAssetPaths(localConfig, steamId);
+    decorations = Object.freeze({
+      background: createProfileBackgroundDescriptor(
+        assetPaths.background,
+        assetPaths.backgroundAnimation
+      ),
+      miniBackground: createSteamProfileDecorationDescriptor(
+        assetPaths.miniBackground,
+        assetPaths.miniBackgroundAnimation
+      ),
+      avatarFrame: createSteamProfileImageDescriptor(assetPaths.avatarFrame)
+    });
   } catch {
-    background = null;
+    decorations = null;
   }
 
-  profileBackgroundCache.set(steamId, { fingerprint, background });
-  return background;
+  profileBackgroundCache.set(steamId, { fingerprint, decorations });
+  return decorations;
+}
+
+export function getActiveSteamProfileBackground(steamPath, activeUser) {
+  return getActiveSteamProfileDecorations(steamPath, activeUser)?.background || null;
 }
 
 export function getActiveSteamProfileBackgroundUrl(steamPath, activeUser) {
