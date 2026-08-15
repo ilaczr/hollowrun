@@ -9,6 +9,7 @@ HollowRun is a portable Windows desktop application for managing local Steam idl
 - Reads the active account's installed games and local Steam play history.
 - Searches and displays verified games owned by the active Steam account.
 - Streams games with Steam trading-card drops remaining into the interface as each badge page is scanned.
+- Starts the trading-card drop scan automatically as soon as the connected Steam account is available.
 - Runs the card-drop queue sequentially or starts up to Steam's 32-AppID limit together; later overflow stays queued.
 - Displays the active account's current public avatar, full or animated background, animated mini-profile background, and animated avatar frame when available.
 - Uses a native, always-on-top startup splash while the portable executable extracts.

@@ -503,7 +503,7 @@ export default function App() {
   }, [activeSteamId]);
 
   useEffect(() => {
-    if (activeTab !== 'cards' && !isBulkQueueActive) return undefined;
+    if (!/^7656\d{13}$/.test(String(activeSteamId || ''))) return undefined;
     const bulkRefresh = isBulkQueueActive;
     fetchCardDrops({ force: bulkRefresh, quiet: bulkRefresh });
     const interval = setInterval(
@@ -514,7 +514,7 @@ export default function App() {
       clearInterval(interval);
       cardScanAbortController.current?.abort();
     };
-  }, [activeTab, fetchCardDrops, isBulkQueueActive]);
+  }, [activeSteamId, fetchCardDrops, isBulkQueueActive]);
 
   useEffect(() => {
     if (!isQueueActive || !queueCurrentAppId) return undefined;
