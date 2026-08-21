@@ -60,3 +60,7 @@ Desktop.ini
 # MD
 TODO.MD
 VERSIONING.md
+CRASH_REPORTING.md
+
+# Test files
+*.test.cjs
