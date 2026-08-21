@@ -2,20 +2,16 @@
 
 HollowRun is a Windows desktop application for managing local Steam idling sessions, available as an installer or portable executable. It connects to the Steam client already running on the computer and does not request Steam credentials, Steam Guard codes, or an in-app sign-in.
 
-![HollowRun](https://i.ibb.co/DPqfXxR6/image.png)
+![HollowRun](https://i.ibb.co/9HNz46rP/image.png)
 
 ## Features
 
 - Reads the active account's installed games and local Steam play history.
 - Searches and displays verified games owned by the active Steam account.
 - Streams games with Steam trading-card drops remaining into the interface as each badge page is scanned.
-- Starts the trading-card drop scan automatically as soon as the connected Steam account is available.
 - Runs the card-drop queue sequentially or starts up to Steam's 32-AppID limit together; later overflow stays queued.
-- Offers an opt-in experimental Friends & Chat label through a managed non-Steam ghost shortcut, hidden from the normal Steam Library after creation.
-- Keeps AppID 480 (Spacewar) blocked from discovery, queues, API requests, and worker startup.
+- Custom "In-Game" status
 - Displays the active account's current public avatar, full or animated background, animated mini-profile background, and animated avatar frame when available.
-- Uses a native, always-on-top startup splash while the portable executable extracts.
-- Stores runtime metadata and window state locally.
 - Provides an opt-in, disabled-by-default crash reporter with privacy-filtered diagnostics.
 
 ## Requirements
