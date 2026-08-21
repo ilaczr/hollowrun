@@ -1,8 +1,20 @@
-const { app, BrowserWindow, dialog, screen, session, utilityProcess } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, screen, session, utilityProcess } = require('electron');
+const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const http = require('http');
 const crypto = require('crypto');
+const { getCrashReportingConfig } = require('./crash-reporting-config.cjs');
+const {
+  captureException,
+  deactivateCrashReporting,
+  initializeCrashReporting,
+  isCrashReportingActive,
+  isCrashReportingInitialized,
+  sendTestReport
+} = require('./crash-reporting.cjs');
+const { readSettings, writeSettings } = require('./settings.cjs');
+const { getPortableRelaunchOptions } = require('./portable-relaunch.cjs');
 const { isSteamClientReady } = require('./startup-gate.cjs');
 const {
   MIN_HEIGHT,
@@ -21,11 +33,15 @@ const DEFAULT_WINDOW_WIDTH = 1600;
 const DEFAULT_WINDOW_HEIGHT = 900;
 const DEFAULT_WINDOW_WORK_AREA_INSET = 48;
 const LEGACY_STEAM_COMMUNITY_PARTITION = 'persist:hollowrun-steam-community';
+const LEGACY_STEAM_COMMUNITY_CLEANUP_MARKER = 'legacy-steam-community-cleared-v1';
 const instanceToken = crypto.randomBytes(32).toString('hex');
 let mainWindow;
 let serverProcess;
 let windowStateSaveTimer;
 let backendReady = false;
+let backendExitCode = null;
+let backendStderr = '';
+let isQuitting = false;
 let startupState = {
   progress: 8,
   action: 'Preparing application window...'
@@ -33,12 +49,100 @@ let startupState = {
 
 app.setName('HollowRun');
 
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
+
+app.on('second-instance', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
+
+const settingsFile = path.join(app.getPath('userData'), 'settings.json');
+const crashReportingConfig = getCrashReportingConfig();
+let appSettings = readSettings(settingsFile);
+
+if (appSettings.diagnostics.autoSendCrashReports && crashReportingConfig.configured) {
+  initializeCrashReporting({
+    dsn: crashReportingConfig.dsn,
+    release: `hollowrun@${app.getVersion()}`,
+    environment: app.isPackaged ? 'production' : 'development'
+  });
+}
+
+function getPublicSettings() {
+  const reportingActive = isCrashReportingActive();
+  const reportingInitialized = isCrashReportingInitialized();
+  const autoSendCrashReports = appSettings.diagnostics.autoSendCrashReports;
+  return {
+    diagnostics: {
+      autoSendCrashReports,
+      reportingConfigured: crashReportingConfig.configured,
+      reportingActive,
+      restartRequired: crashReportingConfig.configured && (
+        autoSendCrashReports ? !reportingActive : reportingInitialized
+      )
+    }
+  };
+}
+
+ipcMain.handle('settings:get', () => getPublicSettings());
+
+ipcMain.handle('settings:set-crash-reports', async (_event, enabled) => {
+  if (typeof enabled !== 'boolean') throw new TypeError('Crash reporting preference must be a boolean.');
+  if (enabled && !crashReportingConfig.configured) {
+    throw new Error('Crash reporting is not configured in this build.');
+  }
+
+  appSettings = writeSettings(settingsFile, {
+    ...appSettings,
+    diagnostics: {
+      ...appSettings.diagnostics,
+      autoSendCrashReports: enabled
+    }
+  });
+  if (!enabled) await deactivateCrashReporting();
+  return getPublicSettings();
+});
+
+ipcMain.handle('app:restart', () => {
+  const relaunchOptions = getPortableRelaunchOptions({
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    environment: process.env
+  });
+  if (relaunchOptions) app.relaunch(relaunchOptions);
+  else app.relaunch();
+
+  // Let the invoke response reach the renderer before beginning normal shutdown.
+  setImmediate(() => app.quit());
+  return true;
+});
+
+if (!app.isPackaged) {
+  ipcMain.handle('crash-reporting:test', async () => ({
+    eventId: await sendTestReport()
+  }));
+}
+
 async function clearLegacySteamCommunitySession() {
+  const markerPath = path.join(app.getPath('userData'), LEGACY_STEAM_COMMUNITY_CLEANUP_MARKER);
+  if (fs.existsSync(markerPath)) return;
+
   const legacySession = session.fromPartition(LEGACY_STEAM_COMMUNITY_PARTITION);
   await Promise.all([
     legacySession.clearStorageData(),
     legacySession.clearCache()
   ]);
+  fs.writeFileSync(markerPath, '', { flag: 'a' });
+}
+
+function scheduleLegacySteamCommunityCleanup() {
+  const timer = setTimeout(() => {
+    clearLegacySteamCommunitySession().catch(() => {});
+  }, 5000);
+  timer.unref?.();
 }
 
 function getDefaultWindowBounds() {
@@ -97,6 +201,7 @@ const waitForServer = async () => {
   updateStartupProgress(34, 'Waiting for local services...');
 
   do {
+    if (backendExitCode !== null) return false;
     if (await checkServer()) {
       updateStartupProgress(78, 'Local services are ready.');
       return true;
@@ -162,6 +267,26 @@ async function showSteamClientRequired(status) {
   });
 }
 
+async function showBackendStartupFailure() {
+  const portIsOccupied = /\bEADDRINUSE\b/.test(backendStderr);
+  const detail = portIsOccupied
+    ? 'Another HollowRun background process is already using local port 3824. Close any remaining HollowRun or Node process in Task Manager, then start HollowRun again.'
+    : backendExitCode !== null
+      ? `The local service exited unexpectedly (code ${backendExitCode}). Restart HollowRun and check whether security software blocked one of its processes.`
+      : 'The local service did not respond within 15 seconds. Restart HollowRun and check whether security software blocked one of its processes.';
+
+  await dialog.showMessageBox(mainWindow, {
+    type: 'error',
+    title: 'HollowRun Startup Failed',
+    message: 'HollowRun could not start its local service.',
+    detail,
+    buttons: ['Close HollowRun'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  });
+}
+
 function isAllowedNavigation(url) {
   return url === SERVER_URL
     || url === `${SERVER_URL}/`
@@ -179,6 +304,7 @@ function loadWindowContent() {
   load.catch((error) => {
     if (error?.code !== 'ERR_ABORTED' && error?.errno !== -3) {
       console.error(`Could not load the HollowRun window: ${error.message}`);
+      captureException(error, { component: 'window-load' });
     }
   });
 }
@@ -215,7 +341,11 @@ function createWindow() {
       contextIsolation: true,
       sandbox: true,
       webviewTag: false,
-      preload: path.join(__dirname, 'loading-preload.cjs')
+      preload: path.join(__dirname, 'loading-preload.cjs'),
+      additionalArguments: [
+        `--hollowrun-crash-reporting=${isCrashReportingActive() ? '1' : '0'}`,
+        `--hollowrun-test-reports=${app.isPackaged ? '0' : '1'}`
+      ]
     },
     icon: path.join(__dirname, 'frontend/public/hollowrun.png')
   });
@@ -238,6 +368,13 @@ function createWindow() {
     if (!isAllowedNavigation(url)) event.preventDefault();
   });
   mainWindow.webContents.on('did-finish-load', publishStartupProgress);
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    if (details.reason === 'clean-exit') return;
+    captureException(
+      new Error(`HollowRun renderer stopped unexpectedly (${details.reason}, exit ${details.exitCode}).`),
+      { component: 'renderer-process' }
+    );
+  });
 
   const saveWindowState = () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -271,7 +408,10 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  await clearLegacySteamCommunitySession().catch(() => {});
+  if (!hasSingleInstanceLock) return;
+
+  createWindow();
+  scheduleLegacySteamCommunityCleanup();
   updateStartupProgress(20, 'Starting local services...');
   const serverPath = path.join(__dirname, 'backend', 'server.js');
   serverProcess = utilityProcess.fork(serverPath, [], {
@@ -284,9 +424,22 @@ app.whenReady().then(async () => {
     stdio: 'pipe'
   });
   serverProcess.stdout?.on('data', (data) => console.log(data.toString().trimEnd()));
-  serverProcess.stderr?.on('data', (data) => console.error(data.toString().trimEnd()));
+  serverProcess.stderr?.on('data', (data) => {
+    const message = data.toString().trimEnd();
+    backendStderr = `${backendStderr}\n${message}`.slice(-4000);
+    console.error(message);
+  });
   serverProcess.on('exit', (code) => {
-    if (code !== 0) console.error(`Backend process exited with code ${code}.`);
+    backendExitCode = code ?? -1;
+    if (code !== 0) {
+      console.error(`Backend process exited with code ${code}.`);
+      if (!isQuitting) {
+        captureException(
+          new Error(`HollowRun backend exited unexpectedly with code ${code}.`),
+          { component: 'backend-process' }
+        );
+      }
+    }
   });
 
   if (await waitForServer()) {
@@ -300,9 +453,10 @@ app.whenReady().then(async () => {
 
     updateStartupProgress(88, 'Loading your Steam library...');
     backendReady = true;
-    createWindow();
+    loadWindowContent();
   } else {
     console.error('Backend server failed to start on port 3824 in time.');
+    await showBackendStartupFailure();
     app.quit();
   }
 
@@ -318,6 +472,7 @@ app.on('window-all-closed', function () {
 });
 
 app.on('before-quit', () => {
+  isQuitting = true;
   if (serverProcess) {
     console.log('Terminating backend server...');
     serverProcess.kill();

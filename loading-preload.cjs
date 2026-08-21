@@ -1,4 +1,21 @@
-const { ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer } = require('electron');
+
+const crashReportingActive = process.argv.includes('--hollowrun-crash-reporting=1');
+const testReportsAvailable = process.argv.includes('--hollowrun-test-reports=1');
+
+const hollowrunApi = {
+  crashReportingActive,
+  testReportsAvailable,
+  getSettings: () => ipcRenderer.invoke('settings:get'),
+  setAutomaticCrashReports: enabled => ipcRenderer.invoke('settings:set-crash-reports', enabled),
+  restart: () => ipcRenderer.invoke('app:restart')
+};
+
+if (testReportsAvailable) {
+  hollowrunApi.sendTestCrashReport = () => ipcRenderer.invoke('crash-reporting:test');
+}
+
+contextBridge.exposeInMainWorld('hollowrun', Object.freeze(hollowrunApi));
 
 let startupState = {
   progress: 8,

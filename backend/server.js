@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { MAX_IDLE_SESSIONS, normalizeGameName, parseAppId, parseIdleAppId } from './validation.js';
 import { parseCardDropCountWorkerOutput, parseCardDropWorkerOutput } from './card-drops.js';
 import { normalizeCustomPresence } from './presence.js';
+import { findWorkerExecutablePath } from './worker-path.js';
 import {
   clearSteamLaunchWatcher,
   configureAndRunGhostShortcut,
@@ -1505,27 +1506,35 @@ function requestOwnedAppIdsFromWorker(candidateIds, expectedSteamId) {
   });
 }
 
-async function getVerifiedOwnedAppIds(steamPath, activeUser, candidateAppIds) {
+async function getVerifiedOwnedAppIds(
+  steamPath,
+  activeUser,
+  candidateAppIds,
+  { allowStale = false } = {}
+) {
   const candidateIds = [...candidateAppIds].filter(isLibraryCandidate).sort((left, right) => left - right);
   if (candidateIds.length === 0) return new Set();
 
   const fingerprint = getOwnershipFingerprint(steamPath, activeUser.steamId, candidateIds);
   const cached = ownershipCache[activeUser.steamId];
+  const candidates = new Set(candidateIds);
+  const cachedAppIds = Array.isArray(cached?.appIds)
+    ? new Set(cached.appIds.map(parseAppId).filter(appId => (
+        appId !== null && candidates.has(appId) && isLibraryCandidate(appId)
+      )))
+    : null;
   if (cached?.fingerprint === fingerprint && Array.isArray(cached.appIds)) {
-    const candidates = new Set(candidateIds);
-    return new Set(cached.appIds.map(parseAppId).filter(appId => appId !== null && candidates.has(appId)));
+    return cachedAppIds;
   }
 
   if (ownershipVerification?.fingerprint === fingerprint) {
-    return ownershipVerification.promise;
+    return allowStale ? cachedAppIds : ownershipVerification.promise;
   }
 
   const verificationPromise = (async () => {
     const verified = await requestOwnedAppIdsFromWorker(candidateIds, activeUser.steamId);
     if (!verified) {
-      if (!Array.isArray(cached?.appIds)) return null;
-      const candidates = new Set(candidateIds);
-      return new Set(cached.appIds.map(parseAppId).filter(appId => appId !== null && candidates.has(appId)));
+      return cachedAppIds;
     }
 
     ownershipCache[activeUser.steamId] = {
@@ -1537,18 +1546,17 @@ async function getVerifiedOwnedAppIds(steamPath, activeUser, candidateAppIds) {
     return verified;
   })();
   ownershipVerification = { fingerprint, promise: verificationPromise };
-
-  try {
-    return await verificationPromise;
-  } finally {
+  verificationPromise.finally(() => {
     if (ownershipVerification?.promise === verificationPromise) ownershipVerification = null;
-  }
+  }).catch(() => {});
+
+  return allowStale ? cachedAppIds : verificationPromise;
 }
 
 // ===================================================================
 // LIBRARY SCANNER - Active-account ownership + install and playtime data
 // ===================================================================
-async function scanFullLibrary(steamPath) {
+async function scanFullLibrary(steamPath, { allowStaleOwnership = false } = {}) {
   if (!steamPath) return [];
 
   const activeUser = getActiveSteamUser(steamPath);
@@ -1612,7 +1620,12 @@ async function scanFullLibrary(steamPath) {
   ]);
   if (candidateAppIds.size === 0) return [];
 
-  const verifiedAppIds = await getVerifiedOwnedAppIds(steamPath, activeUser, candidateAppIds);
+  const verifiedAppIds = await getVerifiedOwnedAppIds(
+    steamPath,
+    activeUser,
+    candidateAppIds,
+    { allowStale: allowStaleOwnership }
+  );
   // If the worker is unavailable, fail closed to the account-specific cache.
   // Play history and the global artwork cache are never ownership evidence.
   const ownedAppIds = verifiedAppIds ?? accountCacheAppIds;
@@ -1654,15 +1667,7 @@ async function scanFullLibrary(steamPath) {
 // WORKER PROCESS MANAGEMENT
 // ===================================================================
 function getWorkerExecutablePath() {
-  const possiblePaths = [
-    path.join(__dirname, '..', 'HollowRun.Worker', 'publish', 'HollowRun.Worker.exe'),
-    path.join(__dirname, '..', 'HollowRun.Worker', 'bin', 'Release', 'net10.0', 'win-x64', 'HollowRun.Worker.exe'),
-    path.join(__dirname, '..', 'HollowRun.Worker', 'bin', 'Debug', 'net10.0', 'HollowRun.Worker.exe')
-  ];
-  for (const p of possiblePaths) {
-    if (fs.existsSync(p)) return p;
-  }
-  return null;
+  return findWorkerExecutablePath(__dirname);
 }
 
 function getSteamClientHelperEnvironment() {
@@ -2333,7 +2338,9 @@ app.get('/api/steam-art/:appid/:kind', (req, res) => {
 app.get('/api/games', async (req, res) => {
   try {
     const steamPath = getSteamPath();
-    const libraryGames = await scanFullLibrary(steamPath);
+    const libraryGames = await scanFullLibrary(steamPath, {
+      allowStaleOwnership: req.query.startup === '1'
+    });
 
     const totalPlaytime = libraryGames.reduce((sum, game) => sum + (game.playtimeMinutes || 0), 0);
     const installedCount = libraryGames.filter(game => game.installed).length;

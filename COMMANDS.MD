@@ -13,7 +13,7 @@ npm.cmd ci
 npm.cmd run setup
 ```
 
-## Build the portable executable
+## Build the installer and portable executable
 
 ```powershell
 npm.cmd run build
@@ -23,3 +23,4 @@ Output:
 
 ```text
 dist-electron\HollowRun <version>.exe
+dist-electron\HollowRun Setup <version>.exe

@@ -1,6 +1,6 @@
 # HollowRun
 
-HollowRun is a portable Windows desktop application for managing local Steam idling sessions. It connects to the Steam client already running on the computer and does not request Steam credentials, Steam Guard codes, or an in-app sign-in.
+HollowRun is a Windows desktop application for managing local Steam idling sessions, available as an installer or portable executable. It connects to the Steam client already running on the computer and does not request Steam credentials, Steam Guard codes, or an in-app sign-in.
 
 ![HollowRun](https://i.ibb.co/DPqfXxR6/image.png)
 
@@ -16,6 +16,7 @@ HollowRun is a portable Windows desktop application for managing local Steam idl
 - Displays the active account's current public avatar, full or animated background, animated mini-profile background, and animated avatar frame when available.
 - Uses a native, always-on-top startup splash while the portable executable extracts.
 - Stores runtime metadata and window state locally.
+- Provides an opt-in, disabled-by-default crash reporter with privacy-filtered diagnostics.
 
 ## Requirements
 
@@ -33,7 +34,7 @@ When applied, HollowRun creates or updates a non-Steam shortcut, moves it into S
 
 ## Build
 
-Install dependencies and create the portable executable:
+Install dependencies and create the installer and portable executable:
 
 ```powershell
 npm.cmd ci
@@ -41,7 +42,13 @@ npm.cmd run setup
 npm.cmd run build
 ```
 
-The output is written to `dist-electron\HollowRun <version>.exe`. See [COMMANDS.MD](COMMANDS.MD) for the complete build notes
+The outputs are written to `dist-electron\HollowRun Setup <version>.exe` and
+`dist-electron\HollowRun <version>.exe`. See [COMMANDS.MD](COMMANDS.MD) for the
+complete build notes.
+
+Crash reporting requires a Sentry project DSN, and readable production React stacks
+require CI-only source-map credentials. See [CRASH_REPORTING.md](CRASH_REPORTING.md)
+for the complete setup and verification checklist.
 
 ## Project structure
 

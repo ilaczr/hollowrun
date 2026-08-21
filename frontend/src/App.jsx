@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { 
   Gamepad2, CheckSquare, UserCircle, Activity, Clock, ListChecks, Zap, Hexagon, Search,
-  Square, X, History, ListPlus, Play, CreditCard, ChevronUp, MessageSquareText
+  Square, X, History, ListPlus, Play, CreditCard, ChevronUp, MessageSquareText,
+  Settings as SettingsIcon, ShieldCheck, Bug, RotateCw, Send
 } from 'lucide-react';
 import './loading.css';
 
@@ -242,6 +243,113 @@ function GameIcon({ appId, name }) {
   );
 }
 
+function SettingsView({
+  settings,
+  pendingAction,
+  feedback,
+  onToggleReports,
+  onRestart,
+  onTestReport,
+  testReportsAvailable
+}) {
+  const diagnostics = settings?.diagnostics;
+  const configured = diagnostics?.reportingConfigured === true;
+  const enabled = diagnostics?.autoSendCrashReports === true;
+  const active = diagnostics?.reportingActive === true;
+  const restartRequired = diagnostics?.restartRequired === true;
+  const isBusy = Boolean(pendingAction);
+  const status = !settings
+    ? 'Loading...'
+    : !configured
+      ? 'Build setup required'
+      : restartRequired
+        ? 'Restart required'
+        : active
+          ? 'Active'
+          : 'Off';
+
+  return (
+    <section className="settings-page" aria-label="HollowRun settings">
+      <div className="settings-card">
+        <div className="settings-card-heading">
+          <span className="settings-card-icon"><ShieldCheck size={20} /></span>
+          <div>
+            <h2>Privacy &amp; diagnostics</h2>
+            <p>Control whether unexpected application failures are reported.</p>
+          </div>
+          <span className={`settings-status ${active && !restartRequired ? 'active' : ''}`}>{status}</span>
+        </div>
+
+        <div className="settings-row">
+          <div className="settings-row-copy">
+            <label htmlFor="automatic-crash-reports">Automatically send crash reports</label>
+            <p>Disabled by default. A restart applies changes to native crash monitoring.</p>
+          </div>
+          <button
+            type="button"
+            id="automatic-crash-reports"
+            className={`settings-toggle ${enabled ? 'enabled' : ''}`}
+            role="switch"
+            aria-checked={enabled}
+            aria-label="Automatically send crash reports"
+            disabled={!settings || isBusy || (!configured && !enabled)}
+            onClick={() => onToggleReports(!enabled)}
+          >
+            <span aria-hidden="true" />
+          </button>
+        </div>
+
+        {!configured && settings && (
+          <div className="settings-notice warning" role="status">
+            Crash reporting has no Sentry destination in this build, so it cannot be enabled yet.
+          </div>
+        )}
+
+        {restartRequired && (
+          <div className="settings-notice" role="status">
+            <span>Your preference is saved. Restart HollowRun to {enabled ? 'start' : 'fully stop'} reporting.</span>
+            <button type="button" disabled={isBusy} onClick={onRestart}>
+              <RotateCw size={14} /> Restart now
+            </button>
+          </div>
+        )}
+
+        {feedback && (
+          <div className={`settings-feedback ${feedback.type}`} role="status">
+            {feedback.text}
+          </div>
+        )}
+
+        <div className="settings-report-details">
+          <div className="settings-detail-title"><Bug size={15} /> What a report contains</div>
+          <p>
+            HollowRun sends the app version, Windows and runtime versions, the failing component,
+            the error, and its stack trace. Low-level crashes may include one native minidump per run.
+          </p>
+          <p>
+            HollowRun does not deliberately attach Steam identity or library data, custom status text,
+            request headers or bodies, cookies, screenshots, activity logs, or local variables. Native
+            minidumps can still contain fragments of process memory or local file paths.
+          </p>
+        </div>
+
+        {testReportsAvailable && (
+          <div className="settings-actions">
+            <button
+              type="button"
+              disabled={!active || restartRequired || isBusy}
+              title={!active ? 'Enable reporting and restart HollowRun first' : 'Send a test event to Sentry'}
+              onClick={onTestReport}
+            >
+              <Send size={14} /> {pendingAction === 'test' ? 'Sending...' : 'Send test report'}
+            </button>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function readStoredTaskQueue(steamId) {
   try {
     const stored = JSON.parse(localStorage.getItem(`${TASK_QUEUE_STORAGE_PREFIX}.${steamId}`) || '[]');
@@ -279,6 +387,9 @@ export default function App() {
   const [gamePage, setGamePage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState('');
+  const [appSettings, setAppSettings] = useState(null);
+  const [settingsPendingAction, setSettingsPendingAction] = useState(null);
+  const [settingsFeedback, setSettingsFeedback] = useState(null);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [avatarLoadFailed, setAvatarLoadFailed] = useState(false);
   const [avatarFrameLoadFailed, setAvatarFrameLoadFailed] = useState(false);
@@ -316,7 +427,7 @@ export default function App() {
     try {
       const [statusRes, gamesRes, sessionsRes] = await Promise.all([
         requestJson('/status'),
-        requestJson('/games'),
+        requestJson('/games?startup=1'),
         requestJson('/sessions')
       ]);
       setStatus(statusRes);
@@ -344,6 +455,79 @@ export default function App() {
     }
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!window.hollowrun?.getSettings) {
+      setAppSettings({
+        diagnostics: {
+          autoSendCrashReports: false,
+          reportingConfigured: false,
+          reportingActive: false,
+          restartRequired: false
+        }
+      });
+      return undefined;
+    }
+
+    window.hollowrun.getSettings()
+      .then(settings => {
+        if (!cancelled) setAppSettings(settings);
+      })
+      .catch(error => {
+        if (!cancelled) setSettingsFeedback({ type: 'error', text: error.message });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleToggleCrashReports = async enabled => {
+    setSettingsPendingAction('toggle');
+    setSettingsFeedback(null);
+    try {
+      const settings = await window.hollowrun.setAutomaticCrashReports(enabled);
+      setAppSettings(settings);
+      setSettingsFeedback({
+        type: 'success',
+        text: enabled
+          ? 'Automatic crash reports will be enabled after restart.'
+          : 'Automatic crash reports are disabled. Restart to remove the active crash monitor.'
+      });
+    } catch (error) {
+      setSettingsFeedback({ type: 'error', text: error.message });
+    } finally {
+      setSettingsPendingAction(null);
+    }
+  };
+
+  const handleRestartApp = async () => {
+    setSettingsPendingAction('restart');
+    setSettingsFeedback(null);
+    try {
+      await window.hollowrun.restart();
+    } catch (error) {
+      setSettingsFeedback({ type: 'error', text: error.message });
+      setSettingsPendingAction(null);
+    }
+  };
+
+  const handleTestCrashReport = async () => {
+    if (!window.hollowrun?.testReportsAvailable || !window.hollowrun.sendTestCrashReport) return;
+    setSettingsPendingAction('test');
+    setSettingsFeedback(null);
+    try {
+      const result = await window.hollowrun.sendTestCrashReport();
+      setSettingsFeedback({
+        type: 'success',
+        text: `Test report sent${result?.eventId ? ` (event ${result.eventId})` : ''}.`
+      });
+    } catch (error) {
+      setSettingsFeedback({ type: 'error', text: error.message });
+    } finally {
+      setSettingsPendingAction(null);
+    }
+  };
+
   const fetchLibraryData = useCallback(async () => {
     try {
       setGames(await requestJson('/games'));
@@ -354,10 +538,16 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetchData();
+    let cancelled = false;
+    let startupLibraryRefresh = null;
+    fetchData().finally(() => {
+      if (!cancelled) startupLibraryRefresh = setTimeout(fetchLibraryData, 500);
+    });
     const activityInterval = setInterval(fetchActivityData, 2000);
     const libraryInterval = setInterval(fetchLibraryData, LIBRARY_REFRESH_INTERVAL_MS);
     return () => {
+      cancelled = true;
+      if (startupLibraryRefresh) clearTimeout(startupLibraryRefresh);
       clearInterval(activityInterval);
       clearInterval(libraryInterval);
     };
@@ -1140,7 +1330,8 @@ export default function App() {
   ]);
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
-  const isSearching = normalizedQuery.length > 0;
+  const isSettingsView = activeTab === 'settings';
+  const isSearching = !isSettingsView && normalizedQuery.length > 0;
   const tabGames = activeTab === 'installed'
     ? allGames.filter(game => game.installed)
     : activeTab === 'cards'
@@ -1247,7 +1438,8 @@ export default function App() {
       installed: 'Installed Games',
       library: 'Library',
       cards: 'Games With Cards',
-      recent: 'Recent Games'
+      recent: 'Recent Games',
+      settings: 'Settings'
     }[activeTab] || 'Library');
   const cardEmptyMessage = cardDrops.status === 'loading'
     ? 'Checking the active Steam account for games with card drops remaining...'
@@ -1300,7 +1492,7 @@ export default function App() {
   }
 
   return (
-    <div className={`app-layout ${isElectron ? 'electron-window' : ''}`} style={profileWallpaperStyle}>
+    <div className={`app-layout ${isElectron ? 'electron-window' : ''} ${isSettingsView ? 'settings-view' : ''}`} style={profileWallpaperStyle}>
       {profileWallpaperVideoUrl && !profileWallpaperVideoLoadFailed && (
         <video
           className="profile-wallpaper-video"
@@ -1347,6 +1539,10 @@ export default function App() {
           <button type="button" className={`nav-item ${activeTab === 'recent' ? 'active' : ''}`} onClick={() => setActiveTab('recent')}>
             <History size={18} className="nav-icon" />
             <span>Recent Games</span>
+          </button>
+          <button type="button" className={`nav-item nav-settings ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')}>
+            <SettingsIcon size={18} className="nav-icon" />
+            <span>Settings</span>
           </button>
         </div>
 
@@ -1516,7 +1712,9 @@ export default function App() {
           <div className="page-heading">
             <h1 className="page-title">{pageTitle}</h1>
             <div className="page-subtitle">
-              {isSearching ? (
+              {isSettingsView ? (
+                <>Privacy, diagnostics, and application preferences</>
+              ) : isSearching ? (
                 <>{activeTab === 'cards' ? 'Within Games With Cards' : 'Across all game sections'} <span className="highlight">{isStoreSearchPending ? 'Checking Steam titles...' : `${filteredGames.length} games.`}</span></>
               ) : activeTab === 'cards' ? (
                 <>Live Steam client card drops {cardDropSummary && <span className="highlight">{cardDropSummary}</span>}</>
@@ -1534,6 +1732,18 @@ export default function App() {
           </div>
         </header>
 
+        {isSettingsView ? (
+          <SettingsView
+            settings={appSettings}
+            pendingAction={settingsPendingAction}
+            feedback={settingsFeedback}
+            onToggleReports={handleToggleCrashReports}
+            onRestart={handleRestartApp}
+            onTestReport={handleTestCrashReport}
+            testReportsAvailable={window.hollowrun?.testReportsAvailable === true}
+          />
+        ) : (
+          <>
         {/* Stats Row */}
         <div className="stats-row">
           <div className="stat-card">
@@ -1728,10 +1938,12 @@ export default function App() {
             <span className="footer-summary">Showing {pageStart}&ndash;{pageEnd} of {filteredGames.length} games</span>
           </div>
         )}
+          </>
+        )}
       </main>
 
       {/* RIGHT SIDEBAR */}
-      <aside className="sidebar-right">
+      {!isSettingsView && <aside className="sidebar-right">
         <div className="panel-card">
           <div className="panel-header">
             Current Session
@@ -1875,7 +2087,7 @@ export default function App() {
           </div>
         </section>
         
-      </aside>
+      </aside>}
     </div>
   );
 }
