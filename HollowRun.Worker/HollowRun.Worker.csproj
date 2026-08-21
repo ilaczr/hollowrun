@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <AssemblyName>HollowRun.Worker</AssemblyName>
     <RootNamespace>HollowRun.Worker</RootNamespace>
     <Version>1.2.11</Version>

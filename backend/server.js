@@ -4,8 +4,18 @@ import path from 'path';
 import { spawn, execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
-import { MAX_IDLE_SESSIONS, normalizeGameName, parseAppId } from './validation.js';
+import { MAX_IDLE_SESSIONS, normalizeGameName, parseAppId, parseIdleAppId } from './validation.js';
 import { parseCardDropCountWorkerOutput, parseCardDropWorkerOutput } from './card-drops.js';
+import { normalizeCustomPresence } from './presence.js';
+import {
+  clearSteamLaunchWatcher,
+  configureAndRunGhostShortcut,
+  getShortcutGameId,
+  isValidShortcutAppId,
+  probeSteamGhostApi,
+  readSteamLaunchActivity,
+  stopGhostShortcut
+} from './steam-ghost.js';
 import {
   fetchPublicSteamProfileAvatar,
   fetchPublicSteamProfileBackground,
@@ -109,11 +119,17 @@ if (fs.existsSync(distPath)) {
 // Fetches real game metadata from Steam Store API and caches to disk
 // ===================================================================
 const LEGACY_CACHE_FILE = path.join(__dirname, 'game_info_cache.json');
+const USER_DATA_DIRECTORY = process.env.HOLLOWRUN_USER_DATA
+  ? path.resolve(process.env.HOLLOWRUN_USER_DATA)
+  : __dirname;
 const CACHE_DIRECTORY = process.env.HOLLOWRUN_USER_DATA
-  ? path.join(path.resolve(process.env.HOLLOWRUN_USER_DATA), 'cache')
+  ? path.join(USER_DATA_DIRECTORY, 'cache')
   : __dirname;
 const CACHE_FILE = path.join(CACHE_DIRECTORY, 'game-info.json');
 const OWNERSHIP_CACHE_FILE = path.join(CACHE_DIRECTORY, 'owned-library.json');
+const GHOST_CONFIG_FILE = path.join(USER_DATA_DIRECTORY, 'ghost-presence.json');
+const GHOST_RUNTIME_DIRECTORY = path.join(USER_DATA_DIRECTORY, 'runtime');
+const GHOST_HEARTBEAT_FILE = path.join(GHOST_RUNTIME_DIRECTORY, 'presence-ghost.heartbeat');
 const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const GAME_INFO_CACHE_VERSION = 2;
 const MAX_METADATA_REQUESTS = 6;
@@ -130,6 +146,42 @@ const CARD_DROP_SCAN_TIMEOUT_MS = 2 * 60 * 1000;
 const CARD_DROP_STDOUT_LIMIT = 1024 * 1024;
 const cardDropCache = new Map();
 const cardDropRequests = new Map();
+
+function loadGhostConfig() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(GHOST_CONFIG_FILE, 'utf8'));
+    const shortcuts = {};
+    if (parsed?.shortcuts && typeof parsed.shortcuts === 'object') {
+      for (const [steamId, entry] of Object.entries(parsed.shortcuts)) {
+        if (!/^7656\d{13}$/.test(steamId) || !entry || typeof entry !== 'object') continue;
+        shortcuts[steamId] = {
+          appId: isValidShortcutAppId(entry.appId) ? Number(entry.appId) : null,
+          text: normalizeCustomPresence(entry.text) || ''
+        };
+      }
+    }
+    return {
+      version: 1,
+      enabled: parsed?.enabled === true,
+      markerOwned: parsed?.markerOwned === true,
+      shortcuts
+    };
+  } catch {
+    return { version: 1, enabled: false, markerOwned: false, shortcuts: {} };
+  }
+}
+
+function saveGhostConfig() {
+  try {
+    fs.mkdirSync(USER_DATA_DIRECTORY, { recursive: true });
+    fs.writeFileSync(GHOST_CONFIG_FILE, JSON.stringify(ghostConfig, null, 2), 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const ghostConfig = loadGhostConfig();
 
 function getDefaultHeaderImage(appId) {
   return `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`;
@@ -967,6 +1019,17 @@ function getSteamAppInfoNames(steamPath, requestedAppIds) {
 
 // In-memory sessions store
 const activeSessions = new Map();
+let ghostPresenceRuntime = { active: false, steamId: '', text: '', appId: null, hidden: false, startedAt: 0 };
+let ghostHeartbeatTimer = null;
+let ghostReassertTimer = null;
+let ghostLaunchWatchTimer = null;
+let ghostLaunchWatchInFlight = false;
+let ghostLaunchRevision = 0;
+const ghostDebuggerState = {
+  ready: false,
+  checkedAt: 0,
+  request: null
+};
 
 // ===================================================================
 // STEAM PATH & USER DETECTION
@@ -999,6 +1062,264 @@ function getSteamPath() {
     }
   }
   return null;
+}
+
+function getSteamDebugMarkerPath(steamPath) {
+  return steamPath ? path.join(steamPath, '.cef-enable-remote-debugging') : null;
+}
+
+function getGhostShortcutEntry(steamId) {
+  if (!/^7656\d{13}$/.test(String(steamId || ''))) return { appId: null, text: '' };
+  const entry = ghostConfig.shortcuts[steamId];
+  return {
+    appId: isValidShortcutAppId(entry?.appId) ? Number(entry.appId) : null,
+    text: normalizeCustomPresence(entry?.text) || ''
+  };
+}
+
+function updateGhostShortcutEntry(steamId, values) {
+  const current = getGhostShortcutEntry(steamId);
+  ghostConfig.shortcuts[steamId] = {
+    appId: isValidShortcutAppId(values?.appId) ? Number(values.appId) : current.appId,
+    text: values?.text === undefined ? current.text : (normalizeCustomPresence(values.text) || '')
+  };
+  return saveGhostConfig();
+}
+
+function refreshGhostDebuggerState(force = false) {
+  if (!ghostConfig.enabled) return Promise.resolve(false);
+  if (!force && Date.now() - ghostDebuggerState.checkedAt < 5000) {
+    return Promise.resolve(ghostDebuggerState.ready);
+  }
+  if (ghostDebuggerState.request) return ghostDebuggerState.request;
+
+  ghostDebuggerState.request = probeSteamGhostApi()
+    .then(result => {
+      ghostDebuggerState.ready = result.ready === true;
+      ghostDebuggerState.checkedAt = Date.now();
+      return ghostDebuggerState.ready;
+    })
+    .catch(() => {
+      ghostDebuggerState.ready = false;
+      ghostDebuggerState.checkedAt = Date.now();
+      return false;
+    })
+    .finally(() => {
+      ghostDebuggerState.request = null;
+    });
+  return ghostDebuggerState.request;
+}
+
+function touchGhostHeartbeat() {
+  try {
+    fs.mkdirSync(GHOST_RUNTIME_DIRECTORY, { recursive: true });
+    const now = new Date();
+    if (fs.existsSync(GHOST_HEARTBEAT_FILE)) {
+      fs.utimesSync(GHOST_HEARTBEAT_FILE, now, now);
+    } else {
+      fs.writeFileSync(GHOST_HEARTBEAT_FILE, `${process.pid}\n`, 'utf8');
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function startGhostHeartbeat() {
+  if (!touchGhostHeartbeat()) return false;
+  if (!ghostHeartbeatTimer) {
+    ghostHeartbeatTimer = setInterval(() => {
+      if (!touchGhostHeartbeat()) stopGhostHeartbeat();
+    }, 5000);
+    ghostHeartbeatTimer.unref();
+  }
+  return true;
+}
+
+function stopGhostHeartbeat() {
+  if (ghostHeartbeatTimer) {
+    clearInterval(ghostHeartbeatTimer);
+    ghostHeartbeatTimer = null;
+  }
+  try {
+    if (fs.existsSync(GHOST_HEARTBEAT_FILE)) fs.unlinkSync(GHOST_HEARTBEAT_FILE);
+  } catch {}
+}
+
+function getGhostLaunchOptions() {
+  return `--presence-ghost "${GHOST_HEARTBEAT_FILE}"`;
+}
+
+function stopGhostLaunchWatch({ clearRemote = false } = {}) {
+  if (ghostLaunchWatchTimer) {
+    clearInterval(ghostLaunchWatchTimer);
+    ghostLaunchWatchTimer = null;
+  }
+  ghostLaunchRevision = 0;
+  if (clearRemote && ghostDebuggerState.ready) {
+    clearSteamLaunchWatcher().catch(() => {});
+  }
+}
+
+async function pollGhostLaunchActivity() {
+  if (!ghostPresenceRuntime.active || ghostLaunchWatchInFlight) return;
+  ghostLaunchWatchInFlight = true;
+  try {
+    const activity = await readSteamLaunchActivity();
+    if (!ghostPresenceRuntime.active) return;
+    if (!activity.supported) {
+      stopGhostLaunchWatch();
+      return;
+    }
+
+    const changed = activity.revision !== ghostLaunchRevision;
+    ghostLaunchRevision = activity.revision;
+    const ghostGameId = getShortcutGameId(ghostPresenceRuntime.appId);
+    if (
+      changed
+      && activity.lastGameId
+      && activity.lastGameId !== ghostGameId
+      && activity.lastAt > ghostPresenceRuntime.startedAt
+    ) {
+      scheduleGhostReassert(500);
+    }
+  } catch {
+    // A later poll can recover if Steam's UI is temporarily unavailable.
+  } finally {
+    ghostLaunchWatchInFlight = false;
+  }
+}
+
+async function startGhostLaunchWatch() {
+  const activity = await readSteamLaunchActivity();
+  if (!ghostPresenceRuntime.active || !activity.supported) return;
+  ghostLaunchRevision = activity.revision;
+  if (!ghostLaunchWatchTimer) {
+    ghostLaunchWatchTimer = setInterval(pollGhostLaunchActivity, 1000);
+    ghostLaunchWatchTimer.unref();
+  }
+}
+
+function getGhostStatus(steamPath, activeUser) {
+  if (ghostConfig.enabled && Date.now() - ghostDebuggerState.checkedAt >= 5000) {
+    refreshGhostDebuggerState().catch(() => {});
+  }
+
+  const steamId = activeUser?.steamId || '';
+  if (ghostPresenceRuntime.active && ghostPresenceRuntime.steamId !== steamId) {
+    const staleAppId = ghostPresenceRuntime.appId;
+    stopGhostHeartbeat();
+    stopGhostLaunchWatch({ clearRemote: true });
+    ghostPresenceRuntime = { active: false, steamId: '', text: '', appId: null, hidden: false, startedAt: 0 };
+    if (isValidShortcutAppId(staleAppId) && ghostDebuggerState.ready) {
+      stopGhostShortcut(staleAppId).catch(() => {});
+    }
+  }
+  const entry = getGhostShortcutEntry(steamId);
+  const workerAvailable = Boolean(getWorkerExecutablePath());
+  const markerPath = getSteamDebugMarkerPath(steamPath);
+  const debugMarkerInstalled = Boolean(markerPath && fs.existsSync(markerPath));
+  const active = ghostPresenceRuntime.active && ghostPresenceRuntime.steamId === steamId;
+
+  return {
+    text: active ? ghostPresenceRuntime.text : entry.text,
+    active,
+    canApply: Boolean(activeUser && ghostConfig.enabled && ghostDebuggerState.ready && workerAvailable),
+    appliedSessions: active ? 1 : 0,
+    optedIn: ghostConfig.enabled,
+    debuggerReady: ghostDebuggerState.ready,
+    debugMarkerInstalled,
+    restartRequired: ghostConfig.enabled && debugMarkerInstalled && !ghostDebuggerState.ready,
+    setupRequired: ghostConfig.enabled && !debugMarkerInstalled && !ghostDebuggerState.ready,
+    configured: Boolean(entry.appId),
+    hidden: active ? ghostPresenceRuntime.hidden : Boolean(entry.appId),
+    workerAvailable
+  };
+}
+
+async function runGhostPresence(steamId, text) {
+  const workerExe = getWorkerExecutablePath();
+  if (!workerExe) throw new Error('HollowRun worker files are missing.');
+  if (!startGhostHeartbeat()) throw new Error('HollowRun could not create the ghost heartbeat.');
+
+  const entry = getGhostShortcutEntry(steamId);
+  let result;
+  try {
+    result = await configureAndRunGhostShortcut({
+      appId: entry.appId,
+      name: text,
+      executablePath: workerExe,
+      startDirectory: path.dirname(workerExe),
+      launchOptions: getGhostLaunchOptions(),
+      restart: ghostPresenceRuntime.active && ghostPresenceRuntime.steamId === steamId
+    });
+  } catch (error) {
+    stopGhostHeartbeat();
+    stopGhostLaunchWatch({ clearRemote: true });
+    ghostPresenceRuntime = { active: false, steamId: '', text: '', appId: null, hidden: false, startedAt: 0 };
+    throw error;
+  }
+
+  if (isValidShortcutAppId(result?.appId)) {
+    if (!updateGhostShortcutEntry(steamId, { appId: result.appId, text })) {
+      stopGhostHeartbeat();
+      try { await stopGhostShortcut(result.appId); } catch {}
+      throw new Error('HollowRun could not save the ghost shortcut settings.');
+    }
+  }
+  if (!result?.success || !result.hidden || !isValidShortcutAppId(result.appId)) {
+    stopGhostHeartbeat();
+    stopGhostLaunchWatch({ clearRemote: true });
+    ghostPresenceRuntime = { active: false, steamId: '', text: '', appId: null, hidden: false, startedAt: 0 };
+    throw new Error(result?.error || 'Steam did not start the hidden ghost shortcut.');
+  }
+
+  ghostPresenceRuntime = {
+    active: true,
+    steamId,
+    text,
+    appId: Number(result.appId),
+    hidden: true,
+    startedAt: Date.now()
+  };
+  startGhostLaunchWatch().catch(() => {});
+  return ghostPresenceRuntime;
+}
+
+function scheduleGhostReassert(delayMs = 1200) {
+  if (!ghostPresenceRuntime.active) return;
+  if (ghostReassertTimer) clearTimeout(ghostReassertTimer);
+  ghostReassertTimer = setTimeout(() => {
+    ghostReassertTimer = null;
+    const { steamId, text } = ghostPresenceRuntime;
+    if (!ghostPresenceRuntime.active || !steamId || !text) return;
+    runGhostPresence(steamId, text).catch(() => {
+      stopGhostHeartbeat();
+      stopGhostLaunchWatch({ clearRemote: true });
+      ghostPresenceRuntime = { active: false, steamId: '', text: '', appId: null, hidden: false, startedAt: 0 };
+    });
+  }, delayMs);
+  ghostReassertTimer.unref();
+}
+
+async function stopGhostPresence({ remove = false, appId: requestedAppId = null } = {}) {
+  if (ghostReassertTimer) {
+    clearTimeout(ghostReassertTimer);
+    ghostReassertTimer = null;
+  }
+  stopGhostHeartbeat();
+  stopGhostLaunchWatch({ clearRemote: true });
+  const appId = isValidShortcutAppId(requestedAppId)
+    ? Number(requestedAppId)
+    : ghostPresenceRuntime.appId;
+  ghostPresenceRuntime = { active: false, steamId: '', text: '', appId: null, hidden: false, startedAt: 0 };
+  if (!isValidShortcutAppId(appId) || !ghostDebuggerState.ready) return false;
+  try {
+    const result = await stopGhostShortcut(appId, { remove });
+    return result?.success === true;
+  } catch {
+    return false;
+  }
 }
 
 function getLocalSteamArtPath(steamPath, appId, kind) {
@@ -1512,6 +1833,9 @@ function updateCachedCardDropCount(steamId, appId, dropsRemaining) {
 
 function startIdleSession(appId, gameName = '') {
   return new Promise((resolve) => {
+    if (parseIdleAppId(appId) === null) {
+      return resolve({ success: false, error: `AppID ${appId} cannot be started by HollowRun.` });
+    }
     if (activeSessions.has(appId)) {
       const existing = activeSessions.get(appId);
       return resolve({ success: true, message: 'Already idling', session: getSessionInfo(existing) });
@@ -1552,7 +1876,7 @@ function startIdleSession(appId, gameName = '') {
       child = spawn(path.join(workerDir, workerExecutableName), [appId.toString()], {
         cwd: workerDir,
         env: { ...process.env, SteamAppId: appId.toString(), SteamGameId: appId.toString() },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true
       });
     } catch (err) {
@@ -1678,6 +2002,7 @@ app.get('/api/status', (req, res) => {
   const avatarFrameUrl = activeUser && profileDecorations.avatarFrame
     ? `/api/steam-profile-decoration/${activeUser.steamId}/avatar-frame?v=${profileDecorations.avatarFrame.revision}`
     : null;
+  const customPresence = getGhostStatus(steamPath, activeUser);
   res.json({
     success: true,
     appVersion: APP_VERSION,
@@ -1711,8 +2036,145 @@ app.get('/api/status', (req, res) => {
           miniProfileBackgroundVideoType: null,
           avatarFrameUrl: null
         },
-    activeSessionsCount: activeSessions.size
+    activeSessionsCount: activeSessions.size,
+    customPresence
   });
+});
+
+app.post('/api/presence/setup', async (req, res) => {
+  if (req.body?.confirm !== true) {
+    return res.status(400).json({ success: false, error: 'Explicit confirmation is required.' });
+  }
+
+  const steamPath = getSteamPath();
+  const activeUser = getConnectedSteamUser(steamPath);
+  if (!steamPath || !activeUser) {
+    return res.status(503).json({ success: false, error: 'Steam is not connected.' });
+  }
+  if (!getWorkerExecutablePath()) {
+    return res.status(503).json({ success: false, error: 'HollowRun worker files are missing.' });
+  }
+
+  const markerPath = getSteamDebugMarkerPath(steamPath);
+  let markerCreated = false;
+  try {
+    if (!fs.existsSync(markerPath)) {
+      fs.writeFileSync(markerPath, '', { flag: 'wx' });
+      ghostConfig.markerOwned = true;
+      markerCreated = true;
+    }
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: `HollowRun could not enable Steam UI access: ${error.message}`
+    });
+  }
+
+  const previousEnabled = ghostConfig.enabled;
+  ghostConfig.enabled = true;
+  if (!saveGhostConfig()) {
+    ghostConfig.enabled = previousEnabled;
+    if (markerCreated) {
+      try { fs.unlinkSync(markerPath); } catch {}
+      ghostConfig.markerOwned = false;
+    }
+    return res.status(500).json({ success: false, error: 'HollowRun could not save the ghost setting.' });
+  }
+
+  ghostDebuggerState.checkedAt = 0;
+  const debuggerReady = await refreshGhostDebuggerState(true);
+  res.json({
+    success: true,
+    optedIn: true,
+    debuggerReady,
+    restartRequired: !debuggerReady,
+    message: debuggerReady
+      ? 'The hidden Steam ghost is ready.'
+      : 'Restart Steam once, then reopen HollowRun.'
+  });
+});
+
+app.delete('/api/presence/setup', async (req, res) => {
+  const steamPath = getSteamPath();
+  const activeUser = getConnectedSteamUser(steamPath);
+  const entry = getGhostShortcutEntry(activeUser?.steamId);
+  const debuggerWasReady = ghostConfig.enabled
+    ? await refreshGhostDebuggerState(true)
+    : ghostDebuggerState.ready;
+  await stopGhostPresence({ remove: true, appId: entry.appId });
+
+  let markerRemoved = false;
+  const markerPath = getSteamDebugMarkerPath(steamPath);
+  if (ghostConfig.markerOwned && markerPath) {
+    try {
+      if (fs.existsSync(markerPath)) fs.unlinkSync(markerPath);
+      markerRemoved = true;
+    } catch {
+      return res.status(500).json({
+        success: false,
+        error: 'The ghost stopped, but HollowRun could not remove the Steam UI access marker.'
+      });
+    }
+  }
+
+  if (activeUser?.steamId) delete ghostConfig.shortcuts[activeUser.steamId];
+  ghostConfig.enabled = false;
+  ghostConfig.markerOwned = false;
+  if (!saveGhostConfig()) {
+    return res.status(500).json({
+      success: false,
+      error: 'The ghost stopped, but HollowRun could not save the disabled setting.'
+    });
+  }
+  res.json({
+    success: true,
+    markerRemoved,
+    restartRequired: markerRemoved && debuggerWasReady
+  });
+});
+
+app.post('/api/presence', async (req, res) => {
+  const presenceText = normalizeCustomPresence(req.body?.text);
+  if (presenceText === null) {
+    return res.status(400).json({ success: false, error: 'Enter a status no longer than 240 UTF-8 bytes.' });
+  }
+
+  const steamPath = getSteamPath();
+  const activeUser = getConnectedSteamUser(steamPath);
+  if (!activeUser) {
+    return res.status(503).json({ success: false, error: 'Steam is not connected.' });
+  }
+  if (!ghostConfig.enabled) {
+    return res.status(409).json({ success: false, error: 'Enable the experimental hidden ghost first.' });
+  }
+  if (!await refreshGhostDebuggerState(true)) {
+    return res.status(409).json({
+      success: false,
+      error: 'Steam UI access is not ready. Restart Steam after enabling the ghost feature.'
+    });
+  }
+
+  try {
+    const result = await runGhostPresence(activeUser.steamId, presenceText);
+    res.json({ success: true, text: result.text, appliedCount: 1, hidden: result.hidden });
+  } catch (error) {
+    res.status(502).json({ success: false, error: error.message || 'Steam did not start the hidden ghost.' });
+  }
+});
+
+app.delete('/api/presence', async (req, res) => {
+  const steamPath = getSteamPath();
+  const activeUser = getConnectedSteamUser(steamPath);
+  const entry = getGhostShortcutEntry(activeUser?.steamId);
+  if (ghostConfig.enabled) await refreshGhostDebuggerState(true);
+  const stopped = await stopGhostPresence({ appId: entry.appId });
+  if (activeUser?.steamId && !updateGhostShortcutEntry(activeUser.steamId, { text: '' })) {
+    return res.status(500).json({
+      success: false,
+      error: 'The ghost stopped, but HollowRun could not save the cleared setting.'
+    });
+  }
+  res.json({ success: true, text: '', stopped });
 });
 
 // Resolve the connected account's public avatar through Steam Community and
@@ -2005,7 +2467,7 @@ app.get('/api/search-steam-store', async (req, res) => {
     const results = (Array.isArray(data.items) ? data.items : [])
       .slice(0, 50)
       .map(item => {
-        const appId = parseAppId(item?.id);
+        const appId = parseIdleAppId(item?.id);
         if (appId === null) return null;
         const finalPrice = Number(item?.price?.final);
         return {
@@ -2041,7 +2503,7 @@ app.post('/api/idle/start', async (req, res) => {
     return res.status(400).json({ success: false, error: `At most ${MAX_IDLE_SESSIONS} AppIDs can be started at once` });
   }
 
-  const targetIds = [...new Set(requestedIds.map(parseAppId))];
+  const targetIds = [...new Set(requestedIds.map(parseIdleAppId))];
   if (targetIds.includes(null)) {
     return res.status(400).json({ success: false, error: 'One or more AppIDs are invalid' });
   }
@@ -2050,6 +2512,7 @@ app.post('/api/idle/start', async (req, res) => {
   for (const appId of targetIds) {
     results.push({ appid: appId, ...(await startIdleSession(appId, name)) });
   }
+  if (results.some(result => result.success)) scheduleGhostReassert();
   res.json({ success: true, results });
 });
 
@@ -2081,6 +2544,13 @@ const server = app.listen(PORT, HOST, () => {
 });
 
 function shutdown() {
+  const ghostAppId = ghostPresenceRuntime.appId;
+  stopGhostHeartbeat();
+  stopGhostLaunchWatch({ clearRemote: true });
+  ghostPresenceRuntime = { active: false, steamId: '', text: '', appId: null, hidden: false, startedAt: 0 };
+  if (isValidShortcutAppId(ghostAppId) && ghostDebuggerState.ready) {
+    stopGhostShortcut(ghostAppId).catch(() => {});
+  }
   if (cacheSaveTimer) {
     clearTimeout(cacheSaveTimer);
     cacheSaveTimer = null;

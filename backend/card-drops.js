@@ -33,7 +33,7 @@ export function parseCardDropWorkerOutput(stdout, expectedSteamId) {
     const gamesByAppId = new Map();
     for (const game of result.games) {
       const appId = parseAppId(game?.appId);
-      if (appId === null || appId <= 10) continue;
+      if (appId === null || appId <= 10 || appId === 480) continue;
 
       const rawCount = Number(game?.dropsRemaining);
       const dropsRemaining = Number.isSafeInteger(rawCount) && rawCount > 0 ? rawCount : null;

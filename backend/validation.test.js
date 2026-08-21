@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_APP_ID, MAX_IDLE_SESSIONS, normalizeGameName, parseAppId } from './validation.js';
+import {
+  MAX_APP_ID,
+  MAX_IDLE_SESSIONS,
+  normalizeGameName,
+  parseAppId,
+  parseIdleAppId
+} from './validation.js';
 
 test('allows up to Steam\'s 32 simultaneous played AppIDs', () => {
   assert.equal(MAX_IDLE_SESSIONS, 32);
@@ -16,6 +22,12 @@ test('parseAppId rejects malformed or out-of-range values', () => {
   for (const value of [null, undefined, {}, [], '', '1.5', '1e2', '../730', 0, -1, MAX_APP_ID + 1, NaN]) {
     assert.equal(parseAppId(value), null);
   }
+});
+
+test('parseIdleAppId blocks Steam Spacewar while accepting real games', () => {
+  assert.equal(parseIdleAppId(480), null);
+  assert.equal(parseIdleAppId('480'), null);
+  assert.equal(parseIdleAppId(730), 730);
 });
 
 test('normalizeGameName removes control characters and limits length', () => {

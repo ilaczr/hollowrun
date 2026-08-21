@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { 
   Gamepad2, CheckSquare, UserCircle, Activity, Clock, ListChecks, Zap, Hexagon, Search,
-  Square, X, History, ListPlus, Play, CreditCard
+  Square, X, History, ListPlus, Play, CreditCard, ChevronUp, MessageSquareText
 } from 'lucide-react';
 import './loading.css';
 
@@ -33,7 +33,7 @@ function normalizeCardDropGames(games) {
   const seen = new Set();
   return (Array.isArray(games) ? games : []).flatMap(game => {
     const appId = Number(game?.appId);
-    if (!Number.isSafeInteger(appId) || appId <= 10 || seen.has(appId)) return [];
+    if (!Number.isSafeInteger(appId) || appId <= 10 || appId === 480 || seen.has(appId)) return [];
     seen.add(appId);
     const dropsRemaining = Number(game?.dropsRemaining);
     return [{
@@ -250,7 +250,7 @@ function readStoredTaskQueue(steamId) {
     const seen = new Set();
     return stored.slice(0, MAX_TASK_QUEUE_ITEMS).flatMap(item => {
       const appId = Number(item?.appId);
-      if (!Number.isInteger(appId) || appId <= 0 || seen.has(appId)) return [];
+      if (!Number.isInteger(appId) || appId <= 0 || appId === 480 || seen.has(appId)) return [];
       seen.add(appId);
       const name = typeof item?.name === 'string' && item.name.trim()
         ? item.name.trim().slice(0, 200)
@@ -285,6 +285,10 @@ export default function App() {
   const [miniBackgroundLoadFailed, setMiniBackgroundLoadFailed] = useState(false);
   const [miniBackgroundVideoLoadFailed, setMiniBackgroundVideoLoadFailed] = useState(false);
   const [profileWallpaperVideoLoadFailed, setProfileWallpaperVideoLoadFailed] = useState(false);
+  const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+  const [presenceDraft, setPresenceDraft] = useState('');
+  const [presencePending, setPresencePending] = useState(false);
+  const [presenceFeedback, setPresenceFeedback] = useState(null);
   const [queuedGames, setQueuedGames] = useState([]);
   const [queueOwnerSteamId, setQueueOwnerSteamId] = useState(null);
   const [isQueueStarting, setIsQueueStarting] = useState(false);
@@ -304,6 +308,7 @@ export default function App() {
   const cardScanAbortController = useRef(null);
   const cardDropChecksInFlight = useRef(new Set());
   const bulkQueueStopsInFlight = useRef(new Set());
+  const profileMenuRef = useRef(null);
   const isBulkQueueActive = bulkQueueAppIds.length > 0;
   const isAnyQueueActive = isQueueActive || isBulkQueueActive;
   
@@ -385,6 +390,23 @@ export default function App() {
   useEffect(() => {
     setProfileWallpaperVideoLoadFailed(false);
   }, [status?.activeUser?.profileWallpaperVideoUrl]);
+
+  useEffect(() => {
+    if (!isProfileMenuOpen) return undefined;
+
+    const closeOnOutsideClick = event => {
+      if (!profileMenuRef.current?.contains(event.target)) setIsProfileMenuOpen(false);
+    };
+    const closeOnEscape = event => {
+      if (event.key === 'Escape') setIsProfileMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [isProfileMenuOpen]);
 
   const activeSteamId = status?.activeUser?.steamId;
 
@@ -572,7 +594,108 @@ export default function App() {
     };
   }, [activeTab, searchQuery]);
 
+  const handleProfileMenuToggle = () => {
+    if (!isProfileMenuOpen) {
+      setPresenceDraft(status?.customPresence?.text || '');
+      setPresenceFeedback(null);
+    }
+    setIsProfileMenuOpen(previous => !previous);
+  };
 
+  const handleApplyPresence = async event => {
+    event.preventDefault();
+    const text = presenceDraft.trim().replace(/\s+/g, ' ');
+    const byteLength = new TextEncoder().encode(text).length;
+    if (!text || byteLength > 240) {
+      setPresenceFeedback({ type: 'error', text: 'Use between 1 and 240 UTF-8 bytes.' });
+      return;
+    }
+
+    setPresencePending(true);
+    setPresenceFeedback(null);
+    try {
+      const result = await requestJson('/presence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      setPresenceDraft(result.text);
+      setStatus(previous => previous ? {
+        ...previous,
+        customPresence: {
+          ...(previous.customPresence || {}),
+          text: result.text,
+          active: true,
+          hidden: result.hidden === true,
+          configured: true,
+          appliedSessions: result.appliedCount
+        }
+      } : previous);
+      setPresenceFeedback({
+        type: 'success',
+        text: result.hidden
+          ? 'Hidden ghost started. Friends & Chat should show this label within a few seconds.'
+          : 'Ghost started, but Steam did not confirm that it is hidden.'
+      });
+    } catch (error) {
+      setPresenceFeedback({ type: 'error', text: error.message });
+    } finally {
+      setPresencePending(false);
+    }
+  };
+
+  const handleClearPresence = async () => {
+    setPresencePending(true);
+    setPresenceFeedback(null);
+    try {
+      await requestJson('/presence', { method: 'DELETE' });
+      setPresenceDraft('');
+      setStatus(previous => previous ? {
+        ...previous,
+        customPresence: {
+          ...(previous.customPresence || {}),
+          text: '',
+          active: false,
+          appliedSessions: 0
+        }
+      } : previous);
+      setPresenceFeedback({ type: 'success', text: 'Hidden ghost stopped.' });
+    } catch (error) {
+      setPresenceFeedback({ type: 'error', text: error.message });
+    } finally {
+      setPresencePending(false);
+    }
+  };
+
+  const handleSetupPresence = async () => {
+    setPresencePending(true);
+    setPresenceFeedback(null);
+    try {
+      const result = await requestJson('/presence/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true })
+      });
+      setStatus(previous => previous ? {
+        ...previous,
+        customPresence: {
+          ...(previous.customPresence || {}),
+          optedIn: true,
+          debuggerReady: result.debuggerReady,
+          restartRequired: result.restartRequired,
+          canApply: result.debuggerReady
+        }
+      } : previous);
+      setPresenceFeedback({
+        type: result.restartRequired ? 'notice' : 'success',
+        text: result.message
+      });
+    } catch (error) {
+      setPresenceFeedback({ type: 'error', text: error.message });
+    } finally {
+      setPresencePending(false);
+    }
+  };
 
   const handleStartRun = async (appId, name) => {
     if (isAnyQueueActive || isQueueStarting) {
@@ -1151,6 +1274,10 @@ export default function App() {
     status?.activeUser?.miniProfileBackgroundVideoUrl || null;
   const miniProfileBackgroundVideoType =
     status?.activeUser?.miniProfileBackgroundVideoType || 'video/webm';
+  const presenceByteLength = new TextEncoder().encode(presenceDraft).length;
+  const presenceStatus = status?.customPresence || {};
+  const canApplyPresence = presenceStatus.canApply === true;
+  const presenceSetupReady = presenceStatus.optedIn === true && presenceStatus.debuggerReady === true;
 
   if (loading) {
     return (
@@ -1223,66 +1350,157 @@ export default function App() {
           </button>
         </div>
 
-        <div className={`sidebar-profile ${(
-          (status?.activeUser?.miniProfileBackgroundUrl && !miniBackgroundLoadFailed)
-          || (miniProfileBackgroundVideoUrl && !miniBackgroundVideoLoadFailed)
-        ) ? 'has-mini-background' : ''}`}>
-          {status?.activeUser?.miniProfileBackgroundUrl && !miniBackgroundLoadFailed && (
-            <img
-              className="profile-mini-background"
-              src={status.activeUser.miniProfileBackgroundUrl}
-              alt=""
-              aria-hidden="true"
-              onError={() => setMiniBackgroundLoadFailed(true)}
-            />
-          )}
-          {miniProfileBackgroundVideoUrl && !miniBackgroundVideoLoadFailed && (
-            <video
-              className="profile-mini-background"
-              autoPlay
-              muted
-              loop
-              playsInline
-              preload="auto"
-              poster={status?.activeUser?.miniProfileBackgroundUrl || undefined}
-              aria-hidden="true"
-              onError={() => setMiniBackgroundVideoLoadFailed(true)}
-            >
-              <source
-                src={miniProfileBackgroundVideoUrl}
-                type={miniProfileBackgroundVideoType}
-              />
-            </video>
-          )}
-          <div className="profile-card-shade" aria-hidden="true" />
-          <div className="profile-info">
-            <div className={`profile-avatar-shell ${status?.activeUser?.avatarFrameUrl && !avatarFrameLoadFailed ? 'has-avatar-frame' : ''}`}>
-              <div className="profile-avatar">
-                {status?.activeUser?.avatarUrl && !avatarLoadFailed ? (
-                  <img
-                    src={status.activeUser.avatarUrl}
-                    alt={`${status.activeUser.personaName} Steam profile`}
-                    onError={() => setAvatarLoadFailed(true)}
+        <div className="sidebar-profile-control" ref={profileMenuRef}>
+          {isProfileMenuOpen && (
+            <section className="profile-menu" id="steam-profile-menu" aria-label="Steam profile actions">
+              <div className="profile-menu-heading">
+                <span className="profile-menu-icon"><MessageSquareText size={15} /></span>
+                <div>
+                  <strong>Custom In-Game</strong>
+                  <span>{
+                    presenceStatus.active
+                      ? 'Hidden ghost running'
+                      : !presenceStatus.optedIn
+                        ? 'Off'
+                        : presenceStatus.debuggerReady
+                          ? 'Steam is ready'
+                          : presenceStatus.restartRequired
+                            ? 'Restart Steam once'
+                            : 'Steam setup required'
+                  }</span>
+                </div>
+              </div>
+              {!presenceSetupReady ? (
+                <div className="presence-setup">
+                  <button
+                    type="button"
+                    className="presence-setup-btn"
+                    disabled={presencePending}
+                    onClick={handleSetupPresence}
+                  >
+                    {presencePending
+                      ? 'Checking...'
+                      : presenceStatus.optedIn
+                        ? 'Check Steam again'
+                        : 'Enable hidden ghost'}
+                  </button>
+                </div>
+              ) : (
+                <form className="presence-form" onSubmit={handleApplyPresence}>
+                  <label htmlFor="custom-presence-input">Custom status</label>
+                  <input
+                    id="custom-presence-input"
+                    type="text"
+                    value={presenceDraft}
+                    maxLength={240}
+                    placeholder="What are you playing?"
+                    autoComplete="off"
+                    autoFocus
+                    onChange={event => {
+                      setPresenceDraft(event.target.value);
+                      setPresenceFeedback(null);
+                    }}
                   />
-                ) : (
-                  <UserCircle size={22} />
+                  <div className={`presence-byte-count ${presenceByteLength > 240 ? 'over-limit' : ''}`}>
+                    {presenceByteLength}/240 bytes
+                  </div>
+                  <div className="presence-actions">
+                    <button
+                      type="submit"
+                      className="presence-apply-btn"
+                      disabled={!canApplyPresence || presencePending || !presenceDraft.trim() || presenceByteLength > 240}
+                    >
+                      {presencePending ? 'Applying...' : presenceStatus.active ? 'Reapply' : 'Apply'}
+                    </button>
+                    <button
+                      type="button"
+                      className="presence-clear-btn"
+                      disabled={presencePending || !presenceStatus.active}
+                      onClick={handleClearPresence}
+                    >
+                      Stop
+                    </button>
+                  </div>
+                </form>
+              )}
+              {presenceFeedback && (
+                <div className={`presence-feedback ${presenceFeedback.type}`} role="status">
+                  {presenceFeedback.text}
+                </div>
+              )}
+            </section>
+          )}
+          <button
+            type="button"
+            className={`sidebar-profile ${(
+              (status?.activeUser?.miniProfileBackgroundUrl && !miniBackgroundLoadFailed)
+              || (miniProfileBackgroundVideoUrl && !miniBackgroundVideoLoadFailed)
+            ) ? 'has-mini-background' : ''} ${isProfileMenuOpen ? 'menu-open' : ''}`}
+            aria-expanded={isProfileMenuOpen}
+            aria-controls="steam-profile-menu"
+            onClick={handleProfileMenuToggle}
+          >
+            {status?.activeUser?.miniProfileBackgroundUrl && !miniBackgroundLoadFailed && (
+              <img
+                className="profile-mini-background"
+                src={status.activeUser.miniProfileBackgroundUrl}
+                alt=""
+                aria-hidden="true"
+                onError={() => setMiniBackgroundLoadFailed(true)}
+              />
+            )}
+            {miniProfileBackgroundVideoUrl && !miniBackgroundVideoLoadFailed && (
+              <video
+                className="profile-mini-background"
+                autoPlay
+                muted
+                loop
+                playsInline
+                preload="auto"
+                poster={status?.activeUser?.miniProfileBackgroundUrl || undefined}
+                aria-hidden="true"
+                onError={() => setMiniBackgroundVideoLoadFailed(true)}
+              >
+                <source
+                  src={miniProfileBackgroundVideoUrl}
+                  type={miniProfileBackgroundVideoType}
+                />
+              </video>
+            )}
+            <div className="profile-card-shade" aria-hidden="true" />
+            <div className="profile-info">
+              <div className={`profile-avatar-shell ${status?.activeUser?.avatarFrameUrl && !avatarFrameLoadFailed ? 'has-avatar-frame' : ''}`}>
+                <div className="profile-avatar">
+                  {status?.activeUser?.avatarUrl && !avatarLoadFailed ? (
+                    <img
+                      src={status.activeUser.avatarUrl}
+                      alt={`${status.activeUser.personaName} Steam profile`}
+                      onError={() => setAvatarLoadFailed(true)}
+                    />
+                  ) : (
+                    <UserCircle size={22} />
+                  )}
+                </div>
+                {status?.activeUser?.avatarFrameUrl && !avatarFrameLoadFailed && (
+                  <img
+                    className="profile-avatar-frame"
+                    src={status.activeUser.avatarFrameUrl}
+                    alt=""
+                    aria-hidden="true"
+                    onError={() => setAvatarFrameLoadFailed(true)}
+                  />
                 )}
               </div>
-              {status?.activeUser?.avatarFrameUrl && !avatarFrameLoadFailed && (
-                <img
-                  className="profile-avatar-frame"
-                  src={status.activeUser.avatarFrameUrl}
-                  alt=""
-                  aria-hidden="true"
-                  onError={() => setAvatarFrameLoadFailed(true)}
-                />
-              )}
+              <div className="profile-copy">
+                <div className="profile-name">{status?.activeUser?.personaName || 'Steam Client'}</div>
+                <div className="profile-subtitle">
+                  <span className="profile-status-dot" />
+                  Steam connected
+                </div>
+              </div>
+              <ChevronUp size={15} className={`profile-menu-chevron ${isProfileMenuOpen ? 'open' : ''}`} />
             </div>
-            <div className="profile-copy">
-              <div className="profile-name">{status?.activeUser?.personaName || 'Steam Client'}</div>
-              <div className="profile-subtitle"><span className="profile-status-dot" />Steam connected</div>
-            </div>
-          </div>
+          </button>
         </div>
       </aside>
 

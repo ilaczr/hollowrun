@@ -11,6 +11,8 @@ HollowRun is a portable Windows desktop application for managing local Steam idl
 - Streams games with Steam trading-card drops remaining into the interface as each badge page is scanned.
 - Starts the trading-card drop scan automatically as soon as the connected Steam account is available.
 - Runs the card-drop queue sequentially or starts up to Steam's 32-AppID limit together; later overflow stays queued.
+- Offers an opt-in experimental Friends & Chat label through a managed non-Steam ghost shortcut, hidden from the normal Steam Library after creation.
+- Keeps AppID 480 (Spacewar) blocked from discovery, queues, API requests, and worker startup.
 - Displays the active account's current public avatar, full or animated background, animated mini-profile background, and animated avatar frame when available.
 - Uses a native, always-on-top startup splash while the portable executable extracts.
 - Stores runtime metadata and window state locally.
@@ -22,6 +24,12 @@ HollowRun is a portable Windows desktop application for managing local Steam idl
 - Node.js 22.12 or newer to build from source.
 - .NET 10 SDK to build the worker and splash projects.
 - .NET 10 Desktop Runtime to run the packaged worker and splash helper.
+
+## Experimental custom In-Game label
+
+Open the expandable Steam profile menu in HollowRun and choose **Enable hidden ghost**. This opt-in creates Steam's `.cef-enable-remote-debugging` marker, so Steam must be restarted once. Local Steam UI debugging remains enabled while that marker is installed; disable the feature from the same menu to remove HollowRun's marker and managed shortcut.
+
+When applied, HollowRun creates or updates a non-Steam shortcut, moves it into Steam's Hidden collection, and runs a heartbeat-only helper under the chosen label. It is intended for Friends & Chat. Steam may still show the real Steam game on the public Community profile, and the shortcut remains visible under Hidden Games or in some running-game surfaces.
 
 ## Build
 

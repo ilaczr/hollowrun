@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
 using Steamworks;
@@ -12,8 +13,23 @@ namespace HollowRun.Worker
 {
     class Program
     {
+        private const uint SpacewarAppId = 480;
+        private const int GhostHeartbeatTimeoutSeconds = 20;
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetConsoleWindow();
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr windowHandle, int command);
+
         static void Main(string[] args)
         {
+            if (args.Length > 0 && args[0] == "--presence-ghost")
+            {
+                RunPresenceGhost(args.Length > 1 ? args[1] : null);
+                return;
+            }
+
             if (args.Length > 0 && args[0] == "--check-card-drops")
             {
                 CheckCardDrops(
@@ -35,9 +51,15 @@ namespace HollowRun.Worker
                 return;
             }
 
-            if (args.Length == 0 || !uint.TryParse(args[0], out uint appId))
+            uint appId = 0;
+            if (args.Length == 0 || !uint.TryParse(args[0], out appId) || appId == SpacewarAppId)
             {
-                Console.WriteLine(JsonSerializer.Serialize(new { success = false, error = "Invalid or missing AppID argument." }));
+                Console.WriteLine(JsonSerializer.Serialize(new {
+                    success = false,
+                    error = appId == SpacewarAppId
+                        ? "AppID 480 (Spacewar) is blocked and cannot be started by HollowRun."
+                        : "Invalid or missing AppID argument."
+                }));
                 return;
             }
 
@@ -99,6 +121,7 @@ namespace HollowRun.Worker
                 steamId = steamId,
                 startTime = DateTime.UtcNow.ToString("o")
             }));
+            Console.Out.Flush();
 
             using ManualResetEventSlim stopSignal = new(false);
             Console.CancelKeyPress += (sender, eventArgs) => {
@@ -125,6 +148,37 @@ namespace HollowRun.Worker
                 status = "STOPPED",
                 appid = appId
             }));
+        }
+
+        private static void RunPresenceGhost(string? heartbeatPath)
+        {
+            try
+            {
+                IntPtr consoleWindow = GetConsoleWindow();
+                if (consoleWindow != IntPtr.Zero) ShowWindow(consoleWindow, 0);
+            }
+            catch
+            {
+                // The helper can still remain alive if Windows refuses to hide its console.
+            }
+
+            if (string.IsNullOrWhiteSpace(heartbeatPath) || !Path.IsPathFullyQualified(heartbeatPath)) return;
+
+            while (true)
+            {
+                try
+                {
+                    if (!File.Exists(heartbeatPath)) return;
+                    DateTime lastHeartbeat = File.GetLastWriteTimeUtc(heartbeatPath);
+                    if (DateTime.UtcNow - lastHeartbeat > TimeSpan.FromSeconds(GhostHeartbeatTimeoutSeconds)) return;
+                }
+                catch
+                {
+                    return;
+                }
+
+                Thread.Sleep(2000);
+            }
         }
 
         private static void VerifyLibraryOwnership(string? expectedSteamId)

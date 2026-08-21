@@ -301,16 +301,196 @@ select:focus-visible {
   color: var(--accent);
 }
 
+.sidebar-profile-control {
+  position: relative;
+  z-index: 5;
+  margin-top: 18px;
+}
+
 .sidebar-profile {
   position: relative;
+  display: block;
+  width: calc(100% - 12px);
   min-height: 76px;
-  margin: 18px 6px 0;
+  margin: 0 6px;
+  padding: 0;
   overflow: hidden;
   border: 1px solid var(--border-color);
   border-radius: 15px 15px 7px 7px;
   background: linear-gradient(135deg, rgba(17, 21, 26, 0.98), rgba(5, 8, 11, 0.98));
+  color: inherit;
+  cursor: pointer;
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.025), 0 8px 20px rgba(0, 0, 0, 0.22);
   isolation: isolate;
+  text-align: left;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.sidebar-profile:hover,
+.sidebar-profile:focus-visible,
+.sidebar-profile.menu-open {
+  border-color: rgba(7, 143, 242, 0.55);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.04), 0 0 0 1px rgba(7, 143, 242, 0.1), 0 8px 20px rgba(0, 0, 0, 0.3);
+}
+
+.profile-menu {
+  position: absolute;
+  z-index: 8;
+  right: 6px;
+  bottom: calc(100% + 8px);
+  left: 6px;
+  padding: 13px;
+  border: 1px solid rgba(7, 143, 242, 0.42);
+  border-radius: 9px;
+  background: linear-gradient(145deg, rgba(15, 20, 26, 0.995), rgba(5, 8, 12, 0.995));
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55), inset 0 1px rgba(255, 255, 255, 0.035);
+}
+
+.profile-menu-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 12px;
+}
+
+.profile-menu-icon {
+  display: grid;
+  width: 29px;
+  height: 29px;
+  flex: 0 0 29px;
+  place-items: center;
+  border: 1px solid rgba(7, 143, 242, 0.34);
+  border-radius: 7px;
+  background: rgba(7, 143, 242, 0.1);
+  color: #71c8ff;
+}
+
+.profile-menu-heading > div {
+  min-width: 0;
+}
+
+.profile-menu-heading strong,
+.profile-menu-heading > div > span {
+  display: block;
+}
+
+.profile-menu-heading strong {
+  color: var(--text-main);
+  font-size: 0.77rem;
+  line-height: 1.2;
+}
+
+.profile-menu-heading > div > span {
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 0.65rem;
+}
+
+.presence-form label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text-subtle);
+  font-size: 0.67rem;
+  font-weight: 650;
+}
+
+.presence-form input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  outline: none;
+  background: rgba(0, 0, 0, 0.34);
+  color: var(--text-main);
+  font-size: 0.75rem;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.presence-form input:focus {
+  border-color: rgba(7, 143, 242, 0.7);
+  box-shadow: 0 0 0 2px rgba(7, 143, 242, 0.1);
+}
+
+.presence-form input::placeholder {
+  color: var(--text-dim);
+}
+
+.presence-byte-count {
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-size: 0.6rem;
+  text-align: right;
+}
+
+.presence-byte-count.over-limit,
+.presence-feedback.error {
+  color: #ff9ca8;
+}
+
+.presence-setup-btn {
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 9px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.presence-setup-btn {
+  border: 1px solid rgba(7, 143, 242, 0.7);
+  background: rgba(7, 143, 242, 0.18);
+  color: #d9f1ff;
+}
+
+.presence-setup-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.presence-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.presence-actions button {
+  min-height: 30px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.presence-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.presence-apply-btn {
+  border: 1px solid rgba(7, 143, 242, 0.7);
+  background: rgba(7, 143, 242, 0.18);
+  color: #d9f1ff;
+}
+
+.presence-clear-btn {
+  border: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--text-subtle);
+}
+
+.presence-feedback {
+  margin-top: 9px;
+  color: #78d99a;
+  font-size: 0.63rem;
+  line-height: 1.35;
+}
+
+.presence-feedback.notice {
+  color: #f0c674;
 }
 
 .sidebar-profile.has-mini-background {
@@ -348,6 +528,7 @@ select:focus-visible {
   align-items: center;
   gap: 9px;
   padding: 11px 12px;
+  text-align: left;
 }
 
 .profile-avatar-shell {
@@ -398,7 +579,19 @@ select:focus-visible {
 }
 
 .profile-copy {
+  flex: 1 1 auto;
   min-width: 0;
+}
+
+.profile-menu-chevron {
+  flex: 0 0 auto;
+  color: rgba(226, 232, 238, 0.58);
+  transition: transform 150ms ease, color 150ms ease;
+}
+
+.profile-menu-chevron.open {
+  color: #71c8ff;
+  transform: rotate(180deg);
 }
 
 .profile-name,

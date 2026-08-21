@@ -5,7 +5,7 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "test": "node --test validation.test.js steam-profile.test.js steam-web-profile.test.js card-drops.test.js"
+    "test": "node --test validation.test.js steam-profile.test.js steam-web-profile.test.js card-drops.test.js presence.test.js steam-ghost.test.js"
   },
   "engines": {
     "node": ">=20.19.0"

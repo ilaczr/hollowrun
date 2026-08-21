@@ -2,6 +2,7 @@ export const MAX_APP_ID = 0xFFFFFFFF;
 export const MAX_IDLE_SESSIONS = 32;
 
 const MAX_GAME_NAME_LENGTH = 120;
+const BLOCKED_IDLE_APP_IDS = new Set([480]);
 
 export function parseAppId(value) {
   if (typeof value !== 'number' && typeof value !== 'string') return null;
@@ -10,6 +11,11 @@ export function parseAppId(value) {
 
   const appId = Number(normalized);
   return Number.isSafeInteger(appId) && appId > 0 && appId <= MAX_APP_ID ? appId : null;
+}
+
+export function parseIdleAppId(value) {
+  const appId = parseAppId(value);
+  return appId !== null && !BLOCKED_IDLE_APP_IDS.has(appId) ? appId : null;
 }
 
 export function normalizeGameName(value, appId) {

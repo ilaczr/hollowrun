@@ -12,6 +12,7 @@ test('parses and normalizes a successful card-drop worker response', () => {
       games: [
         { appId: 48000, dropsRemaining: 3 },
         { appId: 48000, dropsRemaining: 2 },
+        { appId: 480, dropsRemaining: 1 },
         { appId: 10, dropsRemaining: 1 },
         { appId: 12345, dropsRemaining: null }
       ],
