@@ -43,8 +43,7 @@ The outputs are written to `dist-electron\HollowRun Setup <version>.exe` and
 complete build notes.
 
 Crash reporting requires a Sentry project DSN, and readable production React stacks
-require CI-only source-map credentials. See [CRASH_REPORTING.md](CRASH_REPORTING.md)
-for the complete setup and verification checklist.
+require CI-only source-map credentials.
 
 ## Project structure
 
