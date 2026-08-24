@@ -58,6 +58,6 @@ Generated dependencies, caches, publish folders, and packaged output are intenti
 
 ## Release Download
 
-GitHub: [Releases](https://github.com/ju6697/hollowrun/releases)
+GitHub: [Releases](https://github.com/iseethattown/hollowrun/releases)
 
-Codeberg: [Releases](https://codeberg.org/ju6697/hollowrun/releases)
+Codeberg: [Releases](https://codeberg.org/iseethattown/hollowrun/releases)
