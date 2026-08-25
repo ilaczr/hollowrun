@@ -26,7 +26,6 @@ All notable user-facing changes to HollowRun are documented here.
 - Bounded idle-worker startup output and improved errors when worker preparation fails.
 - Reused unchanged per-game worker files so a quick restart does not rewrite a worker that is still exiting.
 - Extended crash-report privacy filtering to redact Windows, macOS, and Linux user-directory paths in renderer reports.
-- Restored the `ju6697` installer author metadata and corrected the GitHub and Codeberg release links.
 - Restored the packaged startup logo and window icon by pointing them at the compiled frontend assets.
 - Added a fail-closed startup handler for unexpected Electron initialization errors.
 
@@ -35,7 +34,6 @@ All notable user-facing changes to HollowRun are documented here.
 ### Added
 
 - Added the Windows setup installer for the first time, alongside the portable executable.
-- Added author metadata for `ju6697`.
 
 ### Changed
 
