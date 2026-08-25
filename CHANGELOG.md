@@ -1,10 +1,8 @@
 # Changelog
 
-All notable user-facing changes to HollowRun are documented here. Future work
-should be added to the **Unreleased** section and moved into a versioned section
-when a release is prepared.
+All notable user-facing changes to HollowRun are documented here.
 
-## Unreleased
+## 2.0.0 - 2026-08-25
 
 ### Changed
 
