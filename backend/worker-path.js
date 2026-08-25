@@ -44,3 +44,7 @@ export function getWorkerExecutableCandidates(baseDirectory) {
 export function findWorkerExecutablePath(baseDirectory, existsSync = fs.existsSync) {
   return getWorkerExecutableCandidates(baseDirectory).find(candidate => existsSync(candidate)) || null;
 }
+
+export function getIdleWorkerDirectory(userDataDirectory, appId) {
+  return path.join(userDataDirectory, 'workers', `app_${appId}`);
+}

@@ -6,8 +6,25 @@ when a release is prepared.
 
 ## Unreleased
 
-Future and in-progress changes will be recorded here. There are no unreleased
-changes yet.
+### Changed
+
+- Isolated frontend utilities and Settings UI from the main application component for simpler maintenance and direct testing.
+- Removed backend tests and duplicate frontend source artwork from packaged application files.
+- Made production source-map uploads explicitly opt-in, even when Sentry credentials are present locally.
+- Prevented Steam helper processes from inheriting HollowRun authentication, data-path, Electron, and crash-reporting environment variables.
+- Made cached library metadata and hidden-ghost configuration writes atomic.
+
+### Fixed
+
+- Restored the complete root test suite and added frontend regression coverage.
+- Enabled undefined-variable linting for the mixed browser and Node frontend toolchain.
+- Fixed packaged game workers being prepared inside the read-only ASAR instead of writable application data.
+- Fixed persisted card-drop queues silently failing to restore.
+- Fixed Recent Games crashing when its extracted timestamp helper was not imported.
+- Prevented a late worker exit or startup timeout from removing a newer session for the same AppID.
+- Bounded idle-worker startup output and improved errors when worker preparation fails.
+- Reused unchanged per-game worker files so a quick restart does not rewrite a worker that is still exiting.
+- Extended crash-report privacy filtering to redact Windows, macOS, and Linux user-directory paths in renderer reports.
 
 ## 1.2.14 - 2026-08-22
 

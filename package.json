@@ -18,7 +18,7 @@
     "build:worker": "dotnet publish HollowRun.Worker/HollowRun.Worker.csproj -c Release -r win-x64 --self-contained false -o HollowRun.Worker/publish",
     "build:splash": "dotnet publish HollowRun.Splash/HollowRun.Splash.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o HollowRun.Splash/publish",
     "build": "npm run build:worker && npm run build:splash && npm run generate:brand && npm run prepare:portable && npm run build:frontend && electron-builder --win",
-    "test": "npm test --prefix backend && node --test window-state.test.cjs startup-gate.test.cjs settings.test.cjs crash-reporting.test.cjs portable-relaunch.test.cjs"
+    "test": "npm test --prefix backend && npm test --prefix frontend && node --test window-state.test.cjs startup-gate.test.cjs settings.test.cjs crash-reporting.test.cjs portable-relaunch.test.cjs"
   },
   "engines": {
     "node": ">=22.12.0"
@@ -54,8 +54,8 @@
       "loading-preload.cjs",
       "window-state.cjs",
       "backend/**/*",
+      "!backend/**/*.test.js",
       "frontend/dist/**/*",
-      "frontend/public/**/*",
       "HollowRun.Worker/publish/**/*"
     ]
   },

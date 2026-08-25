@@ -42,8 +42,9 @@ The outputs are written to `dist-electron\HollowRun Setup <version>.exe` and
 `dist-electron\HollowRun <version>.exe`. See [COMMANDS.MD](COMMANDS.MD) for the
 complete build notes.
 
-Crash reporting requires a Sentry project DSN, and readable production React stacks
-require CI-only source-map credentials.
+Crash reporting requires a Sentry project DSN. Readable production React stacks
+also require CI-only source-map credentials and an explicit
+`SENTRY_UPLOAD_SOURCEMAPS=true` build setting; local builds never upload by default.
 
 ## Project structure
 

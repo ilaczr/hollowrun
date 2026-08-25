@@ -6,8 +6,14 @@ import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { MAX_IDLE_SESSIONS, normalizeGameName, parseAppId, parseIdleAppId } from './validation.js';
 import { parseCardDropCountWorkerOutput, parseCardDropWorkerOutput } from './card-drops.js';
+import { writeJsonAtomically } from './json-storage.js';
 import { normalizeCustomPresence } from './presence.js';
-import { findWorkerExecutablePath } from './worker-path.js';
+import {
+  createIdleWorkerEnvironment,
+  createSteamHelperEnvironment
+} from './worker-environment.js';
+import { copyFileIfChanged } from './worker-files.js';
+import { findWorkerExecutablePath, getIdleWorkerDirectory } from './worker-path.js';
 import {
   clearSteamLaunchWatcher,
   configureAndRunGhostShortcut,
@@ -145,6 +151,7 @@ const gameInfoRequests = new Map();
 const CARD_DROP_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
 const CARD_DROP_SCAN_TIMEOUT_MS = 2 * 60 * 1000;
 const CARD_DROP_STDOUT_LIMIT = 1024 * 1024;
+const IDLE_WORKER_STDOUT_LIMIT = 64 * 1024;
 const cardDropCache = new Map();
 const cardDropRequests = new Map();
 
@@ -174,8 +181,7 @@ function loadGhostConfig() {
 
 function saveGhostConfig() {
   try {
-    fs.mkdirSync(USER_DATA_DIRECTORY, { recursive: true });
-    fs.writeFileSync(GHOST_CONFIG_FILE, JSON.stringify(ghostConfig, null, 2), 'utf8');
+    writeJsonAtomically(GHOST_CONFIG_FILE, ghostConfig);
     return true;
   } catch {
     return false;
@@ -638,15 +644,13 @@ function loadCache() {
 
 function saveCache() {
   try {
-    fs.mkdirSync(CACHE_DIRECTORY, { recursive: true });
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(gameInfoCache, null, 2), 'utf8');
+    writeJsonAtomically(CACHE_FILE, gameInfoCache);
   } catch (e) {}
 }
 
 function saveOwnershipCache() {
   try {
-    fs.mkdirSync(CACHE_DIRECTORY, { recursive: true });
-    fs.writeFileSync(OWNERSHIP_CACHE_FILE, JSON.stringify(ownershipCache, null, 2), 'utf8');
+    writeJsonAtomically(OWNERSHIP_CACHE_FILE, ownershipCache);
   } catch (e) {}
 }
 
@@ -1458,7 +1462,7 @@ function requestOwnedAppIdsFromWorker(candidateIds, expectedSteamId) {
     try {
       child = spawn(workerExe, ['--verify-library', expectedSteamId], {
         cwd: path.dirname(workerExe),
-        env: getSteamClientHelperEnvironment(),
+        env: createSteamHelperEnvironment(),
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true
       });
@@ -1670,15 +1674,6 @@ function getWorkerExecutablePath() {
   return findWorkerExecutablePath(__dirname);
 }
 
-function getSteamClientHelperEnvironment() {
-  const environment = { ...process.env };
-  for (const key of Object.keys(environment)) {
-    const normalizedKey = key.toLowerCase();
-    if (normalizedKey === 'steamappid' || normalizedKey === 'steamgameid') delete environment[key];
-  }
-  return environment;
-}
-
 function requestCardDropsFromWorker(expectedSteamId, onProgress = () => {}) {
   return new Promise(resolve => {
     const workerExe = getWorkerExecutablePath();
@@ -1688,7 +1683,7 @@ function requestCardDropsFromWorker(expectedSteamId, onProgress = () => {}) {
     try {
       child = spawn(workerExe, ['--scan-card-drops', expectedSteamId], {
         cwd: path.dirname(workerExe),
-        env: getSteamClientHelperEnvironment(),
+        env: createSteamHelperEnvironment(),
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true
       });
@@ -1747,7 +1742,7 @@ function requestCardDropCountFromWorker(expectedSteamId, appId) {
     try {
       child = spawn(workerExe, ['--check-card-drops', expectedSteamId, String(appId)], {
         cwd: path.dirname(workerExe),
-        env: getSteamClientHelperEnvironment(),
+        env: createSteamHelperEnvironment(),
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true
       });
@@ -1854,9 +1849,7 @@ function startIdleSession(appId, gameName = '') {
       return resolve({ success: false, error: 'HollowRun worker files are missing. Rebuild HollowRun so the worker is published and packaged with the app.' });
     }
 
-    const workerDir = path.join(__dirname, 'workers', `app_${appId}`);
-    if (!fs.existsSync(workerDir)) fs.mkdirSync(workerDir, { recursive: true });
-
+    const workerDir = getIdleWorkerDirectory(USER_DATA_DIRECTORY, appId);
     const exeDir = path.dirname(workerExe);
     const workerExecutableName = path.basename(workerExe);
     const workerBaseName = path.basename(workerExe, path.extname(workerExe));
@@ -1868,19 +1861,29 @@ function startIdleSession(appId, gameName = '') {
       'Facepunch.Steamworks.Win64.dll',
       'steam_api64.dll'
     ];
-    for (const f of workerFiles) {
-      const src = path.join(exeDir, f);
-      const dst = path.join(workerDir, f);
-      if (fs.existsSync(src)) {
-        try { fs.copyFileSync(src, dst); } catch (e) {}
+
+    try {
+      fs.mkdirSync(workerDir, { recursive: true });
+      for (const fileName of workerFiles) {
+        const sourceFile = path.join(exeDir, fileName);
+        if (fs.existsSync(sourceFile)) {
+          copyFileIfChanged(sourceFile, path.join(workerDir, fileName));
+        }
       }
+    } catch (error) {
+      return resolve({ success: false, error: `Failed to prepare the Steam worker: ${error.message}` });
+    }
+
+    const runtimeWorkerExe = path.join(workerDir, workerExecutableName);
+    if (!fs.existsSync(runtimeWorkerExe)) {
+      return resolve({ success: false, error: 'The prepared Steam worker executable is missing.' });
     }
 
     let child;
     try {
-      child = spawn(path.join(workerDir, workerExecutableName), [appId.toString()], {
+      child = spawn(runtimeWorkerExe, [appId.toString()], {
         cwd: workerDir,
-        env: { ...process.env, SteamAppId: appId.toString(), SteamGameId: appId.toString() },
+        env: createIdleWorkerEnvironment(appId),
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true
       });
@@ -1903,7 +1906,7 @@ function startIdleSession(appId, gameName = '') {
       resolve(result);
     };
     const startupTimeout = setTimeout(() => {
-      stopIdleSession(appId);
+      stopIdleSession(appId, sessionData);
       finishStart({ success: false, error: 'Steam worker timed out while starting.' });
     }, 15000);
 
@@ -1917,7 +1920,7 @@ function startIdleSession(appId, gameName = '') {
           sessionData.steamId = typeof json.steamId === 'string' ? json.steamId.slice(0, 32) : '';
           finishStart({ success: true, session: getSessionInfo(sessionData) });
         } else if (json.success === false) {
-          stopIdleSession(appId);
+          stopIdleSession(appId, sessionData);
           finishStart({ success: false, error: json.error || 'Failed to initialize' });
         }
       } catch (e) {
@@ -1927,6 +1930,12 @@ function startIdleSession(appId, gameName = '') {
 
     child.stdout.on('data', (data) => {
       stdoutBuffer += data.toString();
+      if (stdoutBuffer.length > IDLE_WORKER_STDOUT_LIMIT) {
+        stdoutBuffer = '';
+        stopIdleSession(appId, sessionData);
+        finishStart({ success: false, error: 'Steam worker returned too much startup data.' });
+        return;
+      }
       let newlineIndex;
       while ((newlineIndex = stdoutBuffer.indexOf('\n')) >= 0) {
         const line = stdoutBuffer.slice(0, newlineIndex).trim();
@@ -1937,20 +1946,23 @@ function startIdleSession(appId, gameName = '') {
 
     child.stderr.on('data', (data) => console.error(`[Worker ${appId}]:`, data.toString().slice(0, 2000)));
     child.once('error', (err) => {
-      activeSessions.delete(appId);
+      if (activeSessions.get(appId) === sessionData) activeSessions.delete(appId);
       finishStart({ success: false, error: `Worker process error: ${err.message}` });
     });
     child.on('exit', (code) => {
       processWorkerMessage(stdoutBuffer.trim());
-      activeSessions.delete(appId);
+      if (activeSessions.get(appId) === sessionData) activeSessions.delete(appId);
       finishStart({ success: false, error: `Worker exited with code ${code}` });
     });
   });
 }
 
-function stopIdleSession(appId) {
+function stopIdleSession(appId, expectedSession = null) {
   if (!activeSessions.has(appId)) return { success: false, message: 'Not running' };
   const session = activeSessions.get(appId);
+  if (expectedSession && session !== expectedSession) {
+    return { success: false, message: 'Session already replaced' };
+  }
   try {
     if (session.process && session.process.exitCode === null) {
       session.process.kill('SIGINT');
@@ -1961,7 +1973,7 @@ function stopIdleSession(appId) {
       }, 1000);
     }
   } catch (e) {}
-  activeSessions.delete(appId);
+  if (activeSessions.get(appId) === session) activeSessions.delete(appId);
   return { success: true, appId };
 }
 

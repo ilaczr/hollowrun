@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "lint": "oxlint"
+    "lint": "oxlint",
+    "test": "node --test src/app-utils.test.js src/build-config.test.js src/crash-sanitization.test.js"
   },
   "engines": {
     "node": ">=20.19.0"

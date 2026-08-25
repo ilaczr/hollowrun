@@ -4,6 +4,8 @@ const REDACTED = '[Redacted]';
 const STEAM_ID_PATTERN = /\b7656\d{13}\b/g;
 const INSTANCE_TOKEN_PATTERN = /\b[a-f0-9]{64}\b/gi;
 const URL_QUERY_PATTERN = /(https?:\/\/[^\s?#]+)[?#][^\s]*/gi;
+const WINDOWS_USER_DIRECTORY_PATTERN = /\b[A-Za-z]:[\\/]Users[\\/][^\\/\r\n]+(?=[\\/]|$)/gi;
+const UNIX_USER_DIRECTORY_PATTERN = /(^|[\s"'(])\/(?:Users|home)\/[^/\\\r\n]+(?=[/\\]|$)/g;
 const PRIVATE_INTEGRATIONS = new Set([
   'AdditionalContext',
   'ChildProcess',
@@ -53,6 +55,8 @@ function sanitizeText(value) {
   }
 
   return sanitized
+    .replace(WINDOWS_USER_DIRECTORY_PATTERN, '%USERPROFILE%')
+    .replace(UNIX_USER_DIRECTORY_PATTERN, (_match, prefix) => `${prefix}%USERPROFILE%`)
     .replace(STEAM_ID_PATTERN, REDACTED)
     .replace(INSTANCE_TOKEN_PATTERN, REDACTED)
     .replace(URL_QUERY_PATTERN, '$1');
