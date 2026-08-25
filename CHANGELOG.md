@@ -8,11 +8,14 @@ when a release is prepared.
 
 ### Changed
 
-- Isolated frontend utilities and Settings UI from the main application component for simpler maintenance and direct testing.
+- Isolated frontend utilities, artwork, and Settings UI from the main application component for simpler maintenance and direct testing.
 - Removed backend tests and duplicate frontend source artwork from packaged application files.
 - Made production source-map uploads explicitly opt-in, even when Sentry credentials are present locally.
 - Prevented Steam helper processes from inheriting HollowRun authentication, data-path, Electron, and crash-reporting environment variables.
 - Made cached library metadata and hidden-ghost configuration writes atomic.
+- Consolidated settings, window-state, cache, and hidden-ghost persistence around one atomic JSON writer.
+- Consolidated Electron startup probes around one authenticated, size-bounded local-service client.
+- Completed the build and verification command guide.
 
 ### Fixed
 
@@ -25,13 +28,16 @@ when a release is prepared.
 - Bounded idle-worker startup output and improved errors when worker preparation fails.
 - Reused unchanged per-game worker files so a quick restart does not rewrite a worker that is still exiting.
 - Extended crash-report privacy filtering to redact Windows, macOS, and Linux user-directory paths in renderer reports.
+- Restored the `ju6697` installer author metadata and corrected the GitHub and Codeberg release links.
+- Restored the packaged startup logo and window icon by pointing them at the compiled frontend assets.
+- Added a fail-closed startup handler for unexpected Electron initialization errors.
 
 ## 1.2.14 - 2026-08-22
 
 ### Added
 
 - Added the Windows setup installer for the first time, alongside the portable executable.
-- Added author metadata for "HollowRun".
+- Added author metadata for `ju6697`.
 
 ### Changed
 

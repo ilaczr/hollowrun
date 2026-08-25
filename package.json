@@ -1,8 +1,16 @@
 {
   "name": "hollowrun",
-  "version": "1.2.14",
+  "version": "2.0.0",
   "description": "A zero-credential, local Steam idling tool for Windows that connects directly to your active Steam desktop client instance using Steamworks IPC.",
-  "author": "HollowRun",
+  "author": "ju6697",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ju6697/hollowrun.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ju6697/hollowrun/issues"
+  },
+  "homepage": "https://github.com/ju6697/hollowrun#readme",
   "main": "electron-main.cjs",
   "scripts": {
     "setup": "npm ci --prefix backend && npm ci --prefix frontend",
@@ -18,7 +26,8 @@
     "build:worker": "dotnet publish HollowRun.Worker/HollowRun.Worker.csproj -c Release -r win-x64 --self-contained false -o HollowRun.Worker/publish",
     "build:splash": "dotnet publish HollowRun.Splash/HollowRun.Splash.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o HollowRun.Splash/publish",
     "build": "npm run build:worker && npm run build:splash && npm run generate:brand && npm run prepare:portable && npm run build:frontend && electron-builder --win",
-    "test": "npm test --prefix backend && npm test --prefix frontend && node --test window-state.test.cjs startup-gate.test.cjs settings.test.cjs crash-reporting.test.cjs portable-relaunch.test.cjs"
+    "lint": "npm run lint --prefix frontend",
+    "test": "npm test --prefix backend && npm test --prefix frontend && node --test window-state.test.cjs startup-gate.test.cjs settings.test.cjs crash-reporting.test.cjs portable-relaunch.test.cjs local-service-client.test.cjs repository-config.test.cjs"
   },
   "engines": {
     "node": ">=22.12.0"
@@ -47,6 +56,8 @@
       "electron-main.cjs",
       "crash-reporting-config.cjs",
       "crash-reporting.cjs",
+      "json-storage.cjs",
+      "local-service-client.cjs",
       "portable-relaunch.cjs",
       "settings.cjs",
       "startup-gate.cjs",

@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { writeJsonAtomically } from './json-storage.js';
+import jsonStorage from '../json-storage.cjs';
+
+const { writeJsonAtomically } = jsonStorage;
 
 test('writes canonical JSON atomically and leaves no temporary file', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hollowrun-json-storage-'));

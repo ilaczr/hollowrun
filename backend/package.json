@@ -1,6 +1,6 @@
 {
   "name": "hollowrun-backend",
-  "version": "1.2.14",
+  "version": "2.0.0",
   "description": "Local API server for HollowRun",
   "main": "server.js",
   "type": "module",

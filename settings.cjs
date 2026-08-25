@@ -1,5 +1,5 @@
 const fs = require('fs');
-const path = require('path');
+const { writeJsonAtomically } = require('./json-storage.cjs');
 
 const SETTINGS_VERSION = 1;
 
@@ -34,25 +34,8 @@ function readSettings(filePath) {
 
 function writeSettings(filePath, value) {
   const settings = normalizeSettings(value);
-  const directory = path.dirname(filePath);
-  const temporaryFile = `${filePath}.${process.pid}.tmp`;
-
-  try {
-    fs.mkdirSync(directory, { recursive: true });
-    fs.writeFileSync(temporaryFile, `${JSON.stringify(settings, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600
-    });
-    fs.renameSync(temporaryFile, filePath);
-    return settings;
-  } catch (error) {
-    try {
-      fs.rmSync(temporaryFile, { force: true });
-    } catch {
-      // Best-effort cleanup only. The original settings file remains untouched.
-    }
-    throw error;
-  }
+  writeJsonAtomically(filePath, settings);
+  return settings;
 }
 
 module.exports = {

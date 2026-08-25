@@ -9,11 +9,14 @@ import {
   formatLastPlayed,
   formatPlaytime,
   formatTimer,
+  getDisplayGameName,
   getLastPlayedTime,
   getPaginationItems,
+  hasPlaceholderGameName,
   normalizeCardDropGames,
   parseStoredTaskQueue
 } from './app-utils.js';
+import { GameCover, GameIcon } from './GameArtwork.jsx';
 import SettingsView from './SettingsView.jsx';
 import './loading.css';
 
@@ -30,7 +33,6 @@ const QUEUE_CARD_DROP_REFRESH_INTERVAL_MS = 60000;
 const BULK_QUEUE_CARD_DROP_REFRESH_INTERVAL_MS = 120000;
 const MAX_CONCURRENT_CARD_GAMES = 32;
 const TASK_QUEUE_STORAGE_PREFIX = 'hollowrun.taskQueue';
-const unavailableCoverUrls = new Set();
 
 async function requestJson(path, options) {
   const response = await fetch(`${API_BASE}${path}`, options);
@@ -83,105 +85,6 @@ async function streamCardDrops({ force = false, signal, onUpdate }) {
   processLine(buffer);
   if (!finalResult) throw new Error('Card-drop scan ended without a final result.');
   return finalResult;
-}
-
-function hasPlaceholderGameName(game) {
-  const name = String(game?.name || '').trim();
-  return !name || /^Steam App\s+\d+$/i.test(name);
-}
-
-function getDisplayGameName(game) {
-  return hasPlaceholderGameName(game) ? 'Loading game name...' : game.name;
-}
-
-function getGameCoverUrls(game) {
-  const appId = Number(game?.appid);
-  const suppliedHeader = typeof game?.headerImage === 'string' ? game.headerImage.trim() : '';
-  const suppliedCapsule = typeof game?.capsuleImage === 'string' ? game.capsuleImage.trim() : '';
-  const generatedUrls = Number.isInteger(appId) && appId > 0
-    ? [
-      `/api/steam-art/${appId}/header`,
-      `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`,
-      `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`,
-      `https://cdn.akamai.steamstatic.com/steam/apps/${appId}/header.jpg`,
-      `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appId}/capsule_616x353.jpg`
-    ]
-    : [];
-
-  return [...new Set([
-    ...generatedUrls.slice(0, 1),
-    suppliedHeader,
-    ...generatedUrls.slice(1),
-    suppliedCapsule
-  ].filter(Boolean))];
-}
-
-function GameCoverFallback({ game, displayName }) {
-  const [iconUnavailable, setIconUnavailable] = useState(false);
-
-  return (
-    <div className="game-cover-fallback" role="img" aria-label={`No cover available for ${displayName}`}>
-      {!iconUnavailable ? (
-        <img
-          src={`/api/steam-art/${game.appid}/icon`}
-          alt=""
-          aria-hidden="true"
-          className="game-cover-icon"
-          decoding="async"
-          onError={() => setIconUnavailable(true)}
-        />
-      ) : (
-        <img src={BRAND_LOGO} alt="" aria-hidden="true" className="game-cover-brand-logo" />
-      )}
-      <span className="game-cover-name">Artwork unavailable</span>
-      <span className="game-cover-appid">AppID {game.appid}</span>
-    </div>
-  );
-}
-
-function GameCover({ game }) {
-  const displayName = getDisplayGameName(game);
-  const [, retryCover] = useState(0);
-  const coverUrl = getGameCoverUrls(game).find(url => !unavailableCoverUrls.has(url)) || '';
-
-  if (!coverUrl) {
-    return <GameCoverFallback game={game} displayName={displayName} />;
-  }
-
-  return (
-    <img
-      src={coverUrl}
-      alt=""
-      aria-hidden="true"
-      className="game-image"
-      loading="lazy"
-      decoding="async"
-      draggable="false"
-      referrerPolicy="no-referrer"
-      onError={() => {
-        unavailableCoverUrls.add(coverUrl);
-        retryCover(attempt => attempt + 1);
-      }}
-    />
-  );
-}
-
-function GameIcon({ appId, name }) {
-  const [iconUnavailable, setIconUnavailable] = useState(false);
-
-  return (
-    <div className="task-icon-box">
-      <img
-        key={iconUnavailable ? 'fallback' : appId}
-        src={iconUnavailable ? BRAND_LOGO : `/api/steam-art/${appId}/icon`}
-        alt=""
-        aria-hidden="true"
-        className={`task-icon-image ${iconUnavailable ? 'fallback' : ''}`}
-        title={name}
-        onError={() => setIconUnavailable(true)}
-      />
-    </div>
-  );
 }
 
 function readStoredTaskQueue(steamId) {

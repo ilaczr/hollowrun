@@ -6,7 +6,7 @@ import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { MAX_IDLE_SESSIONS, normalizeGameName, parseAppId, parseIdleAppId } from './validation.js';
 import { parseCardDropCountWorkerOutput, parseCardDropWorkerOutput } from './card-drops.js';
-import { writeJsonAtomically } from './json-storage.js';
+import jsonStorage from '../json-storage.cjs';
 import { normalizeCustomPresence } from './presence.js';
 import {
   createIdleWorkerEnvironment,
@@ -35,6 +35,8 @@ import {
 import {
   fetchSteamProfileItemsEquipped
 } from './steam-web-profile.js';
+
+const { writeJsonAtomically } = jsonStorage;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

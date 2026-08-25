@@ -2,7 +2,6 @@ const { app, BrowserWindow, dialog, ipcMain, screen, session, utilityProcess } =
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
-const http = require('http');
 const crypto = require('crypto');
 const { getCrashReportingConfig } = require('./crash-reporting-config.cjs');
 const {
@@ -14,6 +13,7 @@ const {
   sendTestReport
 } = require('./crash-reporting.cjs');
 const { readSettings, writeSettings } = require('./settings.cjs');
+const { requestLocalJson } = require('./local-service-client.cjs');
 const { getPortableRelaunchOptions } = require('./portable-relaunch.cjs');
 const { isSteamClientReady } = require('./startup-gate.cjs');
 const {
@@ -179,21 +179,11 @@ function updateStartupProgress(progress, action) {
   publishStartupProgress();
 }
 
-const checkServer = () => {
-  return new Promise((resolve) => {
-    const req = http.get(`${SERVER_URL}/api/health`, {
-      headers: { 'X-HollowRun-Instance': instanceToken }
-    }, (res) => {
-      res.resume();
-      resolve(res.statusCode === 200 && res.headers['x-hollowrun-instance'] === instanceToken);
-    });
-    req.on('error', () => resolve(false));
-    req.setTimeout(750, () => {
-      req.destroy();
-      resolve(false);
-    });
-  });
-};
+const checkServer = async () => Boolean(await requestLocalJson(
+  `${SERVER_URL}/api/health`,
+  instanceToken,
+  { timeoutMs: 750 }
+));
 
 const waitForServer = async () => {
   const startedAt = Date.now();
@@ -216,38 +206,10 @@ const waitForServer = async () => {
   return false;
 };
 
-const getBackendStatus = () => {
-  return new Promise((resolve) => {
-    const req = http.get(`${SERVER_URL}/api/status`, {
-      headers: { 'X-HollowRun-Instance': instanceToken }
-    }, (res) => {
-      if (res.statusCode !== 200 || res.headers['x-hollowrun-instance'] !== instanceToken) {
-        res.resume();
-        resolve(null);
-        return;
-      }
-
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', chunk => {
-        body += chunk;
-        if (body.length > 65536) req.destroy();
-      });
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(body));
-        } catch {
-          resolve(null);
-        }
-      });
-    });
-    req.on('error', () => resolve(null));
-    req.setTimeout(3000, () => {
-      req.destroy();
-      resolve(null);
-    });
-  });
-};
+const getBackendStatus = () => requestLocalJson(
+  `${SERVER_URL}/api/status`,
+  instanceToken
+);
 
 async function showSteamClientRequired(status) {
   const steamWasFound = status?.steamInstalled === true;
@@ -347,7 +309,7 @@ function createWindow() {
         `--hollowrun-test-reports=${app.isPackaged ? '0' : '1'}`
       ]
     },
-    icon: path.join(__dirname, 'frontend/public/hollowrun.png')
+    icon: path.join(__dirname, 'frontend/dist/hollowrun.png')
   });
 
   mainWindow.webContents.session.webRequest.onBeforeSendHeaders(
@@ -463,6 +425,17 @@ app.whenReady().then(async () => {
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+}).catch(error => {
+  const startupError = error instanceof Error ? error : new Error(String(error));
+  console.error(`Unexpected HollowRun startup failure: ${startupError.message}`);
+  captureException(startupError, { component: 'app-startup' });
+  if (app.isReady()) {
+    dialog.showErrorBox(
+      'HollowRun Startup Failed',
+      'HollowRun encountered an unexpected error while starting. Restart the application and check whether security software blocked one of its processes.'
+    );
+  }
+  app.quit();
 });
 
 app.on('window-all-closed', function () {

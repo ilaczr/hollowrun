@@ -1,5 +1,5 @@
 const fs = require('fs');
-const path = require('path');
+const { writeJsonAtomically } = require('./json-storage.cjs');
 
 const MIN_WIDTH = 1024;
 const MIN_HEIGHT = 768;
@@ -53,8 +53,7 @@ function writeWindowState(filePath, state) {
   if (!validated) return false;
 
   try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, `${JSON.stringify(validated, null, 2)}\n`, 'utf8');
+    writeJsonAtomically(filePath, validated);
     return true;
   } catch (error) {
     console.error(`Could not save window state: ${error.message}`);

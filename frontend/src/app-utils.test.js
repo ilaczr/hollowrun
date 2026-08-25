@@ -4,8 +4,11 @@ import {
   formatDropsLeft,
   formatPlaytime,
   formatTimer,
+  getDisplayGameName,
+  getGameCoverUrls,
   getLastPlayedTime,
   getPaginationItems,
+  hasPlaceholderGameName,
   normalizeCardDropGames,
   parseStoredTaskQueue
 } from './app-utils.js';
@@ -48,6 +51,28 @@ test('normalizes recent-play timestamps for filtering and sorting', () => {
   );
   assert.equal(getLastPlayedTime({ lastPlayed: 0, lastPlayedDate: 'invalid' }), 0);
   assert.equal(getLastPlayedTime(null), 0);
+});
+
+test('recognizes placeholder names without hiding real Steam titles', () => {
+  assert.equal(hasPlaceholderGameName({ name: '' }), true);
+  assert.equal(hasPlaceholderGameName({ name: 'Steam App 123' }), true);
+  assert.equal(hasPlaceholderGameName({ name: 'Steam App: The Game' }), false);
+  assert.equal(getDisplayGameName({ name: 'Steam App 123' }), 'Loading game name...');
+  assert.equal(getDisplayGameName({ name: 'Portal 2' }), 'Portal 2');
+});
+
+test('orders and deduplicates local, supplied, and generated cover candidates', () => {
+  const urls = getGameCoverUrls({
+    appid: 620,
+    headerImage: 'https://example.test/header.jpg',
+    capsuleImage: 'https://example.test/header.jpg'
+  });
+
+  assert.equal(urls[0], '/api/steam-art/620/header');
+  assert.equal(urls[1], 'https://example.test/header.jpg');
+  assert.equal(urls.filter(url => url === 'https://example.test/header.jpg').length, 1);
+  assert.match(urls.at(-1), /capsule_616x353\.jpg$/);
+  assert.deepEqual(getGameCoverUrls({ appid: 'invalid' }), []);
 });
 
 test('restores the full valid task queue without the former undefined cap', () => {

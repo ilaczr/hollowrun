@@ -41,6 +41,37 @@ export function getLastPlayedTime(game) {
   return Number.isNaN(parsedDate) ? 0 : parsedDate;
 }
 
+export function hasPlaceholderGameName(game) {
+  const name = String(game?.name || '').trim();
+  return !name || /^Steam App\s+\d+$/i.test(name);
+}
+
+export function getDisplayGameName(game) {
+  return hasPlaceholderGameName(game) ? 'Loading game name...' : game.name;
+}
+
+export function getGameCoverUrls(game) {
+  const appId = Number(game?.appid);
+  const suppliedHeader = typeof game?.headerImage === 'string' ? game.headerImage.trim() : '';
+  const suppliedCapsule = typeof game?.capsuleImage === 'string' ? game.capsuleImage.trim() : '';
+  const generatedUrls = Number.isInteger(appId) && appId > 0
+    ? [
+      `/api/steam-art/${appId}/header`,
+      `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`,
+      `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`,
+      `https://cdn.akamai.steamstatic.com/steam/apps/${appId}/header.jpg`,
+      `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appId}/capsule_616x353.jpg`
+    ]
+    : [];
+
+  return [...new Set([
+    ...generatedUrls.slice(0, 1),
+    suppliedHeader,
+    ...generatedUrls.slice(1),
+    suppliedCapsule
+  ].filter(Boolean))];
+}
+
 export function formatLastPlayed(game) {
   const lastPlayedTime = getLastPlayedTime(game);
   if (!lastPlayedTime) return 'Recently played';
