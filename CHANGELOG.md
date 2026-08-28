@@ -2,6 +2,12 @@
 
 All notable user-facing changes to HollowRun are documented here.
 
+## 2.0.1 - 2026-08-28
+
+### Fixed
+
+- Refresh the displayed Steam name from the current public Steam profile instead of stale local login metadata.
+
 ## 2.0.0 - 2026-08-25
 
 ### Changed
@@ -28,7 +34,6 @@ All notable user-facing changes to HollowRun are documented here.
 - Extended crash-report privacy filtering to redact Windows, macOS, and Linux user-directory paths in renderer reports.
 - Restored the packaged startup logo and window icon by pointing them at the compiled frontend assets.
 - Added a fail-closed startup handler for unexpected Electron initialization errors.
-- Refresh the displayed Steam name from the current public Steam profile instead of stale local login metadata.
 
 ## 1.2.14 - 2026-08-22
 

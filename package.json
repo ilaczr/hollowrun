@@ -1,6 +1,6 @@
 {
   "name": "hollowrun",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "A zero-credential, local Steam idling tool for Windows that connects directly to your active Steam desktop client instance using Steamworks IPC.",
   "author": "ju6697",
   "repository": {
