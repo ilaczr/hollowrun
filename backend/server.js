@@ -285,6 +285,7 @@ function getPublicSteamAvatarState(activeUser) {
       steamId,
       resolved: false,
       avatar: null,
+      personaName: null,
       request: null,
       lastAttemptAt: 0
     };
@@ -304,6 +305,7 @@ function getPublicSteamAvatarState(activeUser) {
         if (publicSteamAvatarState === state && result.resolved) {
           state.resolved = true;
           state.avatar = result.avatar;
+          state.personaName = result.personaName;
         }
       })
       .catch(() => {})
@@ -2003,6 +2005,9 @@ app.get('/api/status', (req, res) => {
   const activeUser = getConnectedSteamUser(steamPath);
   const avatarState = getPublicSteamAvatarState(activeUser);
   const avatar = avatarState?.resolved ? avatarState.avatar : null;
+  const personaName = avatarState?.resolved && avatarState.personaName
+    ? avatarState.personaName
+    : activeUser?.personaName;
   const profileDecorations = getLaunchProfileDecorations(steamPath, activeUser);
   const profileBackground = profileDecorations.background;
   const profileWallpaperUrl = activeUser && profileBackground
@@ -2030,7 +2035,7 @@ app.get('/api/status', (req, res) => {
     maxIdleSessions: MAX_IDLE_SESSIONS,
     activeUser: activeUser
       ? {
-          personaName: activeUser.personaName,
+          personaName,
           steamId: activeUser.steamId,
           avatarUrl: avatar
             ? `/api/steam-avatar/${activeUser.steamId}?v=${avatar.revision}`

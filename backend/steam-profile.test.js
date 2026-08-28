@@ -46,10 +46,11 @@ function makePublicProfileHtml(steamId, assetPath = PUBLIC_ASSET) {
   `;
 }
 
-function makePublicProfileXml(steamId, avatarUrl = AVATAR_URL) {
+function makePublicProfileXml(steamId, avatarUrl = AVATAR_URL, personaName = 'Example') {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
     <profile>
       <steamID64>${steamId}</steamID64>
+      <steamID><![CDATA[${personaName}]]></steamID>
       <avatarFull><![CDATA[${avatarUrl}]]></avatarFull>
     </profile>`;
 }
@@ -248,18 +249,26 @@ test('parses and validates the public full-size Steam avatar', () => {
     avatar: {
       remoteUrl: AVATAR_URL,
       revision: AVATAR_HASH
-    }
+    },
+    personaName: 'Example'
   });
   assert.deepEqual(
     parsePublicSteamProfileAvatar(makePublicProfileXml('76561198000000002'), STEAM_ID),
-    { validProfile: false, avatar: null }
+    { validProfile: false, avatar: null, personaName: null }
   );
   assert.deepEqual(
     parsePublicSteamProfileAvatar(
       makePublicProfileXml(STEAM_ID, `https://example.com/${AVATAR_HASH}_full.jpg`),
       STEAM_ID
     ),
-    { validProfile: false, avatar: null }
+    { validProfile: false, avatar: null, personaName: null }
+  );
+  assert.equal(
+    parsePublicSteamProfileAvatar(
+      makePublicProfileXml(STEAM_ID, AVATAR_URL, ' Fresh\n Steam  Name '),
+      STEAM_ID
+    ).personaName,
+    'Fresh Steam Name'
   );
   assert.deepEqual(createSteamAvatarDescriptor(AVATAR_URL), {
     remoteUrl: AVATAR_URL,
@@ -286,7 +295,8 @@ test('fetches the current public avatar without a key or local avatar cache', as
     avatar: {
       remoteUrl: AVATAR_URL,
       revision: AVATAR_HASH
-    }
+    },
+    personaName: 'Example'
   });
   const url = new URL(requestedUrl.url);
   assert.equal(url.origin, 'https://steamcommunity.com');

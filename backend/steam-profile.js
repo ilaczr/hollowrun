@@ -360,24 +360,35 @@ export function parsePublicSteamProfileBackground(profileHtml, expectedSteamId) 
 export function parsePublicSteamProfileAvatar(profileXml, expectedSteamId) {
   const steamId = String(expectedSteamId || '');
   if (typeof profileXml !== 'string' || !/^7656\d{13}$/.test(steamId)) {
-    return { validProfile: false, avatar: null };
+    return { validProfile: false, avatar: null, personaName: null };
   }
 
   const identityMatch = profileXml.match(
     /<steamID64>\s*(?:<!\[CDATA\[\s*)?(7656\d{13})(?:\s*\]\]>)?\s*<\/steamID64>/i
   );
   if (identityMatch?.[1] !== steamId) {
-    return { validProfile: false, avatar: null };
+    return { validProfile: false, avatar: null, personaName: null };
   }
 
+  const personaNameMatch = profileXml.match(
+    /<steamID>\s*(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?\s*<\/steamID>/i
+  );
+  const personaName = String(personaNameMatch?.[1] || '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100);
+
   const avatarMatch = profileXml.match(/<avatarFull>\s*(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?\s*<\/avatarFull>/i);
-  if (!avatarMatch) return { validProfile: false, avatar: null };
+  if (!avatarMatch || !personaName) {
+    return { validProfile: false, avatar: null, personaName: null };
+  }
 
   const avatarUrl = decodeHtmlAttribute(avatarMatch[1]).trim();
   const avatar = createSteamAvatarDescriptor(avatarUrl);
   return avatar
-    ? { validProfile: true, avatar }
-    : { validProfile: false, avatar: null };
+    ? { validProfile: true, avatar, personaName: decodeHtmlAttribute(personaName) }
+    : { validProfile: false, avatar: null, personaName: null };
 }
 
 export function isAllowedSteamProfileBackgroundUrl(value) {
@@ -522,7 +533,7 @@ export async function fetchPublicSteamProfileAvatar(
   } = {}
 ) {
   if (!/^7656\d{13}$/.test(String(steamId || '')) || typeof fetchImpl !== 'function') {
-    return { resolved: false, avatar: null };
+    return { resolved: false, avatar: null, personaName: null };
   }
 
   const controller = new AbortController();
@@ -544,10 +555,10 @@ export async function fetchPublicSteamProfileAvatar(
 
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get('location');
-        if (!location || redirectCount === 2) return { resolved: false, avatar: null };
+        if (!location || redirectCount === 2) return { resolved: false, avatar: null, personaName: null };
         const nextUrl = new URL(location, currentUrl);
         if (!isAllowedSteamCommunityProfileUrl(nextUrl)) {
-          return { resolved: false, avatar: null };
+          return { resolved: false, avatar: null, personaName: null };
         }
         try {
           await response.body?.cancel();
@@ -561,24 +572,24 @@ export async function fetchPublicSteamProfileAvatar(
         !response.ok
         || (!contentType.startsWith('text/xml') && !contentType.startsWith('application/xml'))
       ) {
-        return { resolved: false, avatar: null };
+        return { resolved: false, avatar: null, personaName: null };
       }
 
       const profileXml = await readBoundedTextResponse(response, maximumBytes);
-      if (profileXml === null) return { resolved: false, avatar: null };
+      if (profileXml === null) return { resolved: false, avatar: null, personaName: null };
 
       const parsed = parsePublicSteamProfileAvatar(profileXml, steamId);
       return parsed.validProfile
-        ? { resolved: true, avatar: parsed.avatar }
-        : { resolved: false, avatar: null };
+        ? { resolved: true, avatar: parsed.avatar, personaName: parsed.personaName }
+        : { resolved: false, avatar: null, personaName: null };
     }
   } catch {
-    return { resolved: false, avatar: null };
+    return { resolved: false, avatar: null, personaName: null };
   } finally {
     clearTimeout(timeout);
   }
 
-  return { resolved: false, avatar: null };
+  return { resolved: false, avatar: null, personaName: null };
 }
 
 export function getActiveSteamProfileDecorations(steamPath, activeUser) {
