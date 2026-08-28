@@ -2,7 +2,7 @@
 
 HollowRun is a Windows desktop application for managing local Steam idling sessions, available as an installer or portable executable. It connects to the Steam client already running on the computer and does not request Steam credentials, Steam Guard codes, or an in-app sign-in.
 
-![HollowRun](https://i.ibb.co/9HNz46rP/image.png)
+![HollowRun](https://i.ibb.co/ZprwWwSR/image.png)
 
 ## Features
 
