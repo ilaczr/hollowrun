@@ -64,5 +64,3 @@ See [CHANGELOG.md](CHANGELOG.md) for release history and pending changes.
 ## Release Download
 
 GitHub: [Releases](https://github.com/ju6697/hollowrun/releases)
-
-Codeberg: [Releases](https://codeberg.org/ju6697/hollowrun/releases)
