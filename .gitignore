@@ -59,3 +59,20 @@ Desktop.ini
 
 # MD
 CRASH_REPORTING.md
+
+# Tests
+*.test.js
+*.test.cjs
+*.test.mjs
+*.test.ts
+*.test.tsx
+*.test.jsx
+*.spec.js
+*.spec.cjs
+*.spec.mjs
+*.spec.ts
+*.spec.tsx
+*.spec.jsx
+test/
+tests/
+__tests__/
